@@ -17,13 +17,16 @@ Write-Host "[1/4] Created data/ at $DataDir" -ForegroundColor Green
 
 # 2. Python backend deps
 Write-Host "[2/4] Installing Python deps..." -ForegroundColor Yellow
-pip install fastapi uvicorn httpx wreq-python structlog colorama
+pip install -r "$RepoDir\requirements.txt"
 Write-Host "      Python deps done." -ForegroundColor Green
 
 # 3. Node deps + build
+# Clear npm cache first to free disk space, then install
+Write-Host "[3/4] Clearing npm cache to free disk space..." -ForegroundColor Yellow
+npm cache clean --force
 Write-Host "[3/4] Installing Node deps..." -ForegroundColor Yellow
 Set-Location $WebDir
-npm install
+npm install --no-audit --no-fund
 
 Write-Host "[3/4] Building Next.js..." -ForegroundColor Yellow
 $env:DATABASE_PATH = Join-Path $DataDir "db.sqlite"

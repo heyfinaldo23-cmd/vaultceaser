@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote, unquote, urlparse, urljoin, urlencode
 from pathlib import Path
 
-import wreq as _wreq
+from curl_cffi.requests import AsyncSession as _CurlSession
 
 try:
     import colorama
@@ -541,7 +541,7 @@ _AK_SEARCH_CACHE_TTL     = 600.0     # 10 min
 _ANIKOTO_EP_CACHE_TTL    = 900.0     # 15 min — longer to survive homepage refresh cadence
 _ANIKOTO_STREAM_CACHE_TTL = 3600.0   # 1 h
 
-_anikoto_http_client: Optional[Any] = None  # wreq.Client, typed as Any to avoid import-time binding
+_anikoto_http_client: Optional[Any] = None  # curl_cffi AsyncSession (Chrome TLS fingerprint)
 
 
 async def _fetch_released_counts(anilist_id: int, refresh: bool = False) -> Dict[str, int]:
@@ -852,16 +852,16 @@ async def call_pipe(
 # ─── Anikoto HTTP helpers ────────────────────────────────────────────────────
 
 
-def _get_anikoto_client() -> "_wreq.Client":
-    """Lazy shared wreq Client (Chrome TLS fingerprint → avoids bot detection on anikoto)."""
+def _get_anikoto_client() -> "_CurlSession":
+    """Lazy shared curl_cffi AsyncSession (Chrome TLS fingerprint → avoids bot detection)."""
     global _anikoto_http_client
     if _anikoto_http_client is None:
-        _anikoto_http_client = _wreq.Client(emulation=_wreq.Emulation.Chrome128)
+        _anikoto_http_client = _CurlSession(impersonate="chrome124")
     return _anikoto_http_client
 
 
 def _ak_url(path: str, **params) -> str:
-    """Build an anikoto URL. wreq doesn't honour params= kwargs, embed them in the URL."""
+    """Build an anikoto URL with query params embedded in the string."""
     return f"{ANIKOTO_BASE}{path}?{urlencode(params)}" if params else f"{ANIKOTO_BASE}{path}"
 
 
@@ -906,7 +906,7 @@ async def _anikoto_resolve_id(anilist_id: int, title: str) -> Optional[int]:
     try:
         r = await client.get(_ak_url("/ajax/anime/search", keyword=title), headers=_AK_HDRS)
         r.raise_for_status()
-        payload = await r.json()
+        payload = r.json()
         result_val = payload.get("result")
         html_blob = result_val.get("html", "") if isinstance(result_val, dict) else (result_val or "")
         slug_m = re.search(r'href="(?:https://anikototv\.to)?/watch/([^/"]+)"', html_blob)
@@ -914,7 +914,7 @@ async def _anikoto_resolve_id(anilist_id: int, title: str) -> Optional[int]:
             slug = slug_m.group(1)
             wp = await client.get(_ak_url(f"/watch/{slug}"), headers={"Referer": f"{ANIKOTO_BASE}/"})
             wp.raise_for_status()
-            wp_text = await wp.text()
+            wp_text = wp.text
             id_m = re.search(r'data-id="(\d+)"', wp_text)
             if id_m:
                 anikoto_id = int(id_m.group(1))
@@ -952,7 +952,7 @@ async def _anikoto_get_episodes(anikoto_id: int) -> List[Dict]:
         headers={**_AK_HDRS, "Referer": f"{ANIKOTO_BASE}/watch/"},
     )
     r.raise_for_status()
-    payload = await r.json()
+    payload = r.json()
     html = payload.get("result") or ""
 
     episodes: List[Dict] = []
@@ -995,7 +995,7 @@ async def _anikoto_get_link_id(data_ids: str, category: str) -> Optional[str]:
         headers={**_AK_HDRS, "Referer": f"{ANIKOTO_BASE}/watch/"},
     )
     r.raise_for_status()
-    payload = await r.json()
+    payload = r.json()
     html = payload.get("result") or ""
 
     cat = category if category in ("sub", "dub") else "sub"
@@ -1024,7 +1024,7 @@ async def _anikoto_get_stream_url(link_id: str) -> Optional[str]:
         headers={**_AK_HDRS, "Referer": f"{ANIKOTO_BASE}/watch/"},
     )
     r.raise_for_status()
-    data   = await r.json()
+    data   = r.json()
     result = data.get("result")
     url    = result.get("url") if isinstance(result, dict) else None
     _ANIKOTO_STREAM_CACHE[link_id] = (time.monotonic(), url)
@@ -1157,7 +1157,7 @@ async def _anikoto_search(keyword: str) -> List[Dict]:
         client = _get_anikoto_client()
         r = await client.get(_ak_url("/ajax/anime/search", keyword=keyword), headers=_AK_HDRS)
         r.raise_for_status()
-        payload = await r.json()
+        payload = r.json()
         result_val = payload.get("result")
         html = result_val.get("html", "") if isinstance(result_val, dict) else (result_val or "")
         results = _anikoto_parse_search_html(html)
@@ -1184,7 +1184,7 @@ async def _anikoto_watch_meta(slug: str) -> Optional[Dict]:
         client = _get_anikoto_client()
         r = await client.get(f"{ANIKOTO_BASE}/watch/{slug}", headers={"Referer": f"{ANIKOTO_BASE}/"})
         r.raise_for_status()
-        text = await r.text()
+        text = r.text
 
         # Numeric anikoto ID
         id_m = re.search(r'id="watch-main"[^>]+data-id="(\d+)"', text)

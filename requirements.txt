@@ -3,3 +3,4 @@ uvicorn[standard]
 httpx
 structlog>=24.1.0
 colorama>=0.4.6
+curl_cffi>=0.7.0
