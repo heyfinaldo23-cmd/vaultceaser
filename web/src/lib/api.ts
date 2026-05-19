@@ -1,4 +1,9 @@
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8080";
+// Browser: use same-origin empty string — Vercel rewrites proxy to the backend (no mixed-content).
+// Server (SSR/RSC): call the backend directly (server-to-server HTTP is fine).
+const BASE_URL =
+  typeof window !== "undefined"
+    ? ""
+    : (process.env.BACKEND_URL || "http://37.114.37.107:8080");
 
 export interface AnimeMedia {
   id: number;
