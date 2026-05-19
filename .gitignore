@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+venv/
+*.egg-info/
+
+# Node / Next.js
+node_modules/
+web/.next/
+web/out/
+web/.env.local
+web/.env*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Sensitive / temp
+scripts/
+.codex/
+ayush/
+*.har
+"New Text Document.txt"
+New Text Document.txt
+p.txt
+customize.png
+Screenshot_6.png
+episodes.png
+seassons.png
+inv.py
+waytest.py
+check_server.py
+backupserver.py
+
+# Dist
+dist/
+build/

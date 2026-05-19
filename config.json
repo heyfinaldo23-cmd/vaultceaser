@@ -1,0 +1,29 @@
+{
+  "_comment": "upstream=uses vidwish.live JWPlayer (bun.har behavior). Add fallback pipe URLs under pipe_fallback_bases if miruro.tv goes down.",
+  "embed_s2_mode": "upstream",
+  "miruro_base": "https://www.miruro.tv",
+  "pipe_fallback_bases": [],
+  "pipe_dead_ttl": 120,
+  "stream_upstream_base": "https://vidwish.live",
+  "anilist_url": "https://graphql.anilist.co",
+  "cdn_host_suffixes": [
+    "watching.onl",
+    "cloudbuzz.lol",
+    "livedns.my",
+    "ultracloud.cc",
+    "jwpcdn.com",
+    "vidwish.live",
+    "megaplay.buzz",
+    "cinewave2.site",
+    "streamzone1.site",
+    "mewstream.buzz",
+    "orbitra.click",
+    "sparqle.click",
+    "glimmeron.click",
+    "lostproject.club"
+  ],
+  "embed_asset_hosts": [
+    "vidwish.live",
+    "megaplay.buzz"
+  ]
+}

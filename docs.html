@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vault Ceaser — API &amp; architecture</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #0f1115;
+      --text: #e8eaed;
+      --muted: #9aa0a6;
+      --accent: #8ab4f8;
+      --line: #3c4043;
+      --row: #1a1d23;
+      --max: 52rem;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #fafafa;
+        --text: #202124;
+        --muted: #5f6368;
+        --accent: #1a73e8;
+        --line: #dadce0;
+        --row: #f1f3f4;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 0.9375rem;
+      line-height: 1.5;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main { max-width: var(--max); margin: 0 auto; padding: 2rem 1.15rem 3.5rem; }
+    h1 { font-size: 1.6rem; font-weight: 600; margin: 0 0 0.25em; letter-spacing: -0.02em; }
+    .lead { color: var(--muted); margin: 0 0 1.75rem; }
+    h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 2.25rem 0 0.75rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--line);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0 0 1.25rem;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.5rem 0.65rem;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; width: 7rem; }
+    tr:nth-child(even) td { background: var(--row); }
+    .mono { font-family: ui-monospace, monospace; font-size: 0.86em; word-break: break-all; }
+    .m { color: #81c995; font-weight: 600; width: 3.25rem; }
+    p.note { color: var(--muted); font-size: 0.875rem; margin: -0.5rem 0 1rem; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    pre.flow {
+      margin: 0 0 1.25rem;
+      padding: 1rem 1rem 1rem 1.1rem;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      overflow-x: auto;
+      background: var(--row);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text);
+    }
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Vault Ceaser — API &amp; architecture</h1>
+    <p class="lead">
+      Paths are under your app origin (host + port). While the server runs, OpenAPI + try-it UI:
+      <a href="/docs"><span class="mono">/docs</span></a>.
+      This page is also served at <a href="/docs.html"><span class="mono">/docs.html</span></a> (same content as <span class="mono">docs.html</span> in the repo).
+      <br><strong style="color:#e8621a">v2:</strong> Anikoto.tv is now the primary source for episode lists and streams; Miruro pipe is fallback.
+      HTTP client for anikoto uses <a href="https://github.com/0x676e67/wreq-python"><span class="mono">wreq</span></a> (Chrome TLS fingerprint).
+    </p>
+
+    <h2>General</h2>
+    <table>
+      <tr><th class="m">GET</th><td class="mono">/</td><td>Service name, version, short index of route names.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/health</td><td>Process liveness: status and version.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/health</td><td>Upstream checks: each configured pipe base (HEAD latency), circuit-breaker state, <span class="mono">embed_s2_mode</span>, <span class="mono">stream_upstream_base</span>, config path.</td></tr>
+    </table>
+
+    <h2>Configuration (<span class="mono">config.json</span>)</h2>
+    <p class="note">Override path with env <span class="mono">VAULTCEASER_CONFIG</span>. Restart the server after edits.</p>
+    <table>
+      <tr><th class="mono">miruro_base</th><td>Primary origin for <span class="mono">/api/secure/pipe</span> (e.g. <span class="mono">https://www.miruro.tv</span>).</td></tr>
+      <tr><th class="mono">pipe_fallback_bases</th><td>JSON array of extra pipe origins, same API contract. Tried in order when the primary fails or is temporarily marked dead.</td></tr>
+      <tr><th class="mono">pipe_dead_ttl</th><td>Seconds (default <span class="mono">120</span>) a pipe host stays deprioritized after a transport / 5xx / decode failure. Client <span class="mono">4xx</span> from the pipe does not mark the whole host dead.</td></tr>
+      <tr><th class="mono">stream_upstream_base</th><td>JWPlayer embed site (e.g. <span class="mono">https://vidwish.live</span>) — <span class="mono">/stream/s-2/…</span>, <span class="mono">/stream/getSources</span>.</td></tr>
+      <tr><th class="mono">embed_s2_mode</th><td><strong>upstream</strong> = real upstream iframe (numeric id resolved from pipe). <strong>synthetic</strong> / <strong>proxy</strong> = local player or proxied HTML, more traffic via <span class="mono">/api/cdn-hls</span>.</td></tr>
+      <tr><th class="mono">cdn_host_suffixes</th><td>Allowlist of host suffixes for <span class="mono">/api/cdn-hls</span>.</td></tr>
+      <tr><th class="mono">embed_asset_hosts</th><td>Hosts used when rewriting embed asset URLs.</td></tr>
+      <tr><th class="mono">anilist_url</th><td>GraphQL endpoint for catalogue metadata.</td></tr>
+    </table>
+
+    <h2>Discovery &amp; catalogs</h2>
+    <table>
+      <tr><th class="m">GET</th><td class="mono">/api/genres</td><td>Genre list plus allowed formats, statuses, seasons, provider name, and stream categories.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/search</td><td>Query parameters: <span class="mono">q</span> (optional), <span class="mono">page</span>, <span class="mono">per_page</span>, optional <span class="mono">genre</span> (comma-separated), <span class="mono">format</span>, <span class="mono">status</span>, <span class="mono">year</span>, <span class="mono">season</span>, <span class="mono">sort</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/suggestions</td><td>Required <span class="mono">q</span> — short autocomplete list.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/filter</td><td>Browse-style filter: optional <span class="mono">genre</span>, <span class="mono">tag</span>, <span class="mono">year</span>, <span class="mono">season</span>, <span class="mono">format</span>, <span class="mono">status</span>; <span class="mono">sort</span>, <span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/spotlight</td><td>Small trending set for a hero section.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/trending</td><td><span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/popular</td><td><span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/upcoming</td><td><span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/recent</td><td>Currently airing, <span class="mono">START_DATE_DESC</span>. <span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/fresh</td><td>Fresh Additions — any status, <span class="mono">UPDATED_AT_DESC</span>. <span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/latest-releases</td><td>Latest Releases — currently airing, <span class="mono">START_DATE_DESC</span>. <span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/recently-completed</td><td>Recently Completed — <span class="mono">FINISHED</span> status, <span class="mono">END_DATE_DESC</span>. <span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/schedule</td><td>Upcoming air times with <span class="mono">airingAt</span> Unix timestamps; <span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/homepage</td><td>Combined homepage sections in one response.</td></tr>
+    </table>
+
+    <h2>Show details</h2>
+    <p class="note"><span class="mono">{anilist_id}</span> is the numeric AniList media id.</p>
+    <table>
+      <tr><th class="m">GET</th><td class="mono">/api/anime/{anilist_id}</td><td>Full metadata plus streaming hints (links to episodes and stream endpoints).</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/anime/{anilist_id}/characters</td><td><span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/anime/{anilist_id}/relations</td><td>Related titles.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/anime/{anilist_id}/recommendations</td><td><span class="mono">page</span>, <span class="mono">per_page</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/anime/{anilist_id}/episodes</td><td>Episode list — <strong>anikoto.tv primary</strong> (ids formatted <span class="mono">anikoto:{ep_id}</span>), Miruro pipe fallback. Includes <span class="mono">original_id</span> used by <span class="mono">/api/stream/iframe</span>.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/anime/{anilist_id}/stream</td><td>Episodes with resolved stream info for the first few entries. Query: <span class="mono">provider</span> (default megaplay), <span class="mono">category</span> (sub · dub · ssub), optional <span class="mono">episode_number</span>.</td></tr>
+    </table>
+
+    <h2>Playback</h2>
+    <p class="note">Stream <span class="mono">category</span>: <strong>sub</strong>, <strong>dub</strong>, <strong>ssub</strong>. Provider: <strong>megaplay</strong>. Pipe uses provider key <span class="mono">bee</span> internally for slug ids.</p>
+    <table>
+      <tr><th class="m">GET</th><td class="mono">/api/sources</td><td>Required: <span class="mono">episode_id</span>, <span class="mono">anilist_id</span>. Optional: <span class="mono">provider</span>, <span class="mono">category</span>. Normalized sources for a player.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/stream/url</td><td>Required: <span class="mono">episode_id</span>. Optional: <span class="mono">provider</span>, <span class="mono">category</span>, <span class="mono">anilist_id</span>. Single HLS URL plus tracks when present.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/stream/iframe</td><td>Required: <span class="mono">episode_id</span>. Optional: <span class="mono">category</span>, <span class="mono">anilist_id</span>. For <span class="mono">anikoto:*</span> ids: resolves full anikoto chain → megaplay URL. For slug ids: Miruro pipe. JSON: <span class="mono">iframe_url</span>, <span class="mono">embed_html</span>, <span class="mono">embed_s2_mode</span> (<span class="mono">anikoto</span> | <span class="mono">upstream</span> | <span class="mono">synthetic</span>).</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/watch/{anilist_id}</td><td>HTML watch UI (episode list + iframe). Not JSON.</td></tr>
+    </table>
+
+    <h2>Proxies</h2>
+    <table>
+      <tr><th class="m">GET</th><td class="mono">/api/cdn-hls?u=…&amp;r=…</td><td><span class="mono">u</span>: percent-encoded absolute URL (m3u8, segment, vtt). <span class="mono">r</span> (optional): per-stream Origin/Referer base from pipe entries (e.g. megaplay vs vidwish). GET, HEAD, OPTIONS.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/mp/…</td><td>Reverse proxy to the embed host (pages, <span class="mono">getSources</span>, assets). Path mirrors upstream under this prefix. GET, HEAD, OPTIONS.</td></tr>
+    </table>
+
+    <h2>Advanced</h2>
+    <table>
+      <tr><th class="m">POST</th><td class="mono">/api/pipe</td><td>JSON body: required <span class="mono">path</span>; optional <span class="mono">method</span> (default GET), <span class="mono">query</span>, <span class="mono">referer</span>. Pass-through to the configured pipe API.</td></tr>
+      <tr><th class="m">GET</th><td class="mono">/api/episode-counts</td><td>Batch sub/dub released counts. Required: <span class="mono">ids</span> (comma-separated, max 50). Optional: <span class="mono">refresh=true</span>. Source: Miruro pipe (5-min cache).</td></tr>
+    </table>
+
+    <h2>Anikoto integration (v2)</h2>
+    <p class="note">
+      Episode data and stream URLs are resolved via <a href="https://anikototv.to">anikototv.to</a>.
+      HTTP client uses <a href="https://github.com/0x676e67/wreq-python">wreq</a> (Chrome 128 TLS fingerprint).
+      Miruro pipe remains as fallback for any anime not found on anikoto.
+    </p>
+    <table>
+      <tr><th>Cache key</th><td class="mono">anilist_id → anikoto_id</td><td>24 h. Resolved via title search + watch page scrape.</td></tr>
+      <tr><th>Cache key</th><td class="mono">anikoto_id → episodes[]</td><td>5 min. Parsed from <span class="mono">/ajax/episode/list/{id}?vrf=</span>.</td></tr>
+      <tr><th>Cache key</th><td class="mono">link_id → megaplay_url</td><td>1 h. Resolved via <span class="mono">/ajax/server?get={link_id}</span>.</td></tr>
+      <tr><th>Episode id format</th><td class="mono">anikoto:{ep_id}</td><td>Opaque id passed to <span class="mono">/api/stream/iframe</span>. Server looks up <span class="mono">data_ids</span> blob from in-memory cache to resolve the stream chain.</td></tr>
+    </table>
+
+    <h2>Request flow (diagram)</h2>
+    <p class="note">Solid lines: typical path. Dashed: optional (AniList for catalogue; <span class="mono">/api/cdn-hls</span> when not using upstream iframe).</p>
+    <pre class="flow">
+  ┌─────────────────────────────────────┐
+  │  Browser (Next.js / /watch page)    │
+  └──────────────────┬──────────────────┘
+                     │
+                     v
+            ┌────────────────┐
+            │  VaultCeaser   │
+            │   (FastAPI)    │
+            └────────┬───────┘
+                     │
+    ┌────────────────┼────────────────────────┐
+    │                │                        │
+    v                v                        v
+ AniList       anikototv.to               call_pipe
+ (GraphQL)     (wreq · Chrome TLS)        miruro_base
+    │                │                    (fallback)
+    │  ┌─────────────┤                        │
+    │  │             │                        v
+    │  │  1. /ajax/anime/search?keyword=…   /api/secure/pipe
+    │  │  2. /watch/{slug}  → data-id       (gzip+b64)
+    │  │  3. /ajax/episode/list/{id}?vrf=
+    │  │  4. /ajax/server/list?servers=…
+    │  │  5. /ajax/server?get=…  → megaplay URL
+    │  └─────────────┐
+    │                v
+    └──────► megaplay.buzz /stream/s-2/{id}/{cat}
+                     │
+                     v
+             JWPlayer ──► CDN (HLS segments, subtitles)
+
+  Auto-next (watch page):
+    timer fires at (episode_duration - 30 s) → 30-s countdown banner → goNext()
+    (iframe is cross-origin; postMessage not available)
+
+  ID caches (server memory):
+    _ANIKOTO_ID_CACHE   anilist_id → anikoto_id   24 h
+    _ANIKOTO_EP_CACHE   anikoto_id → episodes      5 min
+    _ANIKOTO_STREAM_CACHE link_id  → megaplay URL  1 h
+    _ANIKOTO_TITLE_CACHE  anilist_id → title       session
+    </pre>
+
+    <footer>
+      Markdown twin: <span class="mono">README.md</span> in the repo root. HAR research: <span class="mono">research/README.md</span>.
+      JSON field shapes: OpenAPI at <a href="/docs"><span class="mono">/docs</span></a> while the app is running.
+    </footer>
+  </main>
+</body>
+</html>
