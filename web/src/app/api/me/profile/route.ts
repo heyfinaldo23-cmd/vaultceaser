@@ -13,9 +13,6 @@ const patchSchema = z.object({
 
 export async function PATCH(req: Request) {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json({ error: "DATABASE_URL is not configured" }, { status: 503 });
-  }
   const uid = await getSessionUserId();
   if (!uid) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 

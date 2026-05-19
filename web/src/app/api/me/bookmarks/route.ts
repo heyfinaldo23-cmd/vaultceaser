@@ -16,19 +16,15 @@ const addSchema = z.object({
 
 export async function GET() {
   const db = getDb();
-  if (!db) return NextResponse.json({ items: [], db: false });
   const uid = await getSessionUserId();
-  if (!uid) return NextResponse.json({ items: [], db: true });
+  if (!uid) return NextResponse.json({ items: [] });
 
   const rows = await db.select().from(bookmarks).where(eq(bookmarks.userId, uid));
-  return NextResponse.json({ items: rows, db: true });
+  return NextResponse.json({ items: rows });
 }
 
 export async function POST(req: Request) {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json({ error: "DATABASE_URL is not configured" }, { status: 503 });
-  }
   const uid = await getSessionUserId();
   if (!uid) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
@@ -60,9 +56,6 @@ export async function POST(req: Request) {
 
 export async function DELETE(req: Request) {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json({ error: "DATABASE_URL is not configured" }, { status: 503 });
-  }
   const uid = await getSessionUserId();
   if (!uid) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 

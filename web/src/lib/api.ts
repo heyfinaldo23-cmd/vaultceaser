@@ -1,9 +1,9 @@
-// Browser: use same-origin empty string — Vercel rewrites proxy to the backend (no mixed-content).
-// Server (SSR/RSC): call the backend directly (server-to-server HTTP is fine).
+// On the server (SSR/RSC): call FastAPI directly on localhost.
+// In the browser: use same-origin "" so Next.js rewrites handle the proxy.
 const BASE_URL =
-  typeof window !== "undefined"
-    ? ""
-    : (process.env.BACKEND_URL || "http://37.114.37.107:8080");
+  typeof window === "undefined"
+    ? (process.env.BACKEND_URL || "http://localhost:8080")
+    : "";
 
 export interface AnimeMedia {
   id: number;

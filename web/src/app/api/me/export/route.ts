@@ -8,9 +8,6 @@ export const runtime = "nodejs";
 
 export async function GET() {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json({ error: "DATABASE_URL is not configured" }, { status: 503 });
-  }
   const uid = await getSessionUserId();
   if (!uid) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 

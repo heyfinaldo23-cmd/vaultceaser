@@ -17,9 +17,8 @@ const upsertSchema = z.object({
 
 export async function GET() {
   const db = getDb();
-  if (!db) return NextResponse.json({ items: [], db: false });
   const uid = await getSessionUserId();
-  if (!uid) return NextResponse.json({ items: [], db: true });
+  if (!uid) return NextResponse.json({ items: [] });
 
   const rows = await db
     .select()
@@ -27,14 +26,11 @@ export async function GET() {
     .where(eq(watchProgress.userId, uid))
     .orderBy(desc(watchProgress.updatedAt));
 
-  return NextResponse.json({ items: rows, db: true });
+  return NextResponse.json({ items: rows });
 }
 
 export async function POST(req: Request) {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json({ error: "DATABASE_URL is not configured" }, { status: 503 });
-  }
   const uid = await getSessionUserId();
   if (!uid) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 

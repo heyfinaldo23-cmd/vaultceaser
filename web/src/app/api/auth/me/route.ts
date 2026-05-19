@@ -8,9 +8,6 @@ export const runtime = "nodejs";
 
 export async function GET() {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json({ user: null, db: false });
-  }
   const uid = await getSessionUserId();
   if (!uid) {
     return NextResponse.json({ user: null, db: true });

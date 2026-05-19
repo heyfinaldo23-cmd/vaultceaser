@@ -9,12 +9,6 @@ export const runtime = "nodejs";
 
 export async function POST() {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json(
-      { error: "DATABASE_URL is not configured" },
-      { status: 503 }
-    );
-  }
 
   for (let attempt = 0; attempt < 12; attempt++) {
     const code = generateAccountCode();

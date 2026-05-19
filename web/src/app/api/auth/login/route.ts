@@ -14,12 +14,6 @@ const bodySchema = z.object({
 
 export async function POST(req: Request) {
   const db = getDb();
-  if (!db) {
-    return NextResponse.json(
-      { error: "DATABASE_URL is not configured" },
-      { status: 503 }
-    );
-  }
 
   let json: unknown;
   try {

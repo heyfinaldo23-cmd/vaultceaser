@@ -1,9 +1,8 @@
 import type { NextConfig } from "next";
 
-// Backend FastAPI server. Set BACKEND_URL in Vercel env vars.
-// Rewrites proxy all /api/* traffic (except Next.js own routes) through Vercel
-// so the browser never makes HTTP calls to a plain IP (fixes mixed-content issues).
-const BACKEND = process.env.BACKEND_URL || "http://37.114.37.107:8080";
+// FastAPI runs on the same machine. Default: localhost:8080.
+// Override with BACKEND_URL env var if running on a different port.
+const BACKEND = process.env.BACKEND_URL || "http://localhost:8080";
 
 const nextConfig: NextConfig = {
   async rewrites() {

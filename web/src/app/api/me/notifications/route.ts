@@ -9,9 +9,8 @@ export const runtime = "nodejs";
 /** In-app notifications (Drizzle). Real-time alerts can be wired to Supabase later. */
 export async function GET() {
   const db = getDb();
-  if (!db) return NextResponse.json({ items: [], db: false });
   const uid = await getSessionUserId();
-  if (!uid) return NextResponse.json({ items: [], db: true });
+  if (!uid) return NextResponse.json({ items: [] });
 
   const rows = await db
     .select()
@@ -20,5 +19,5 @@ export async function GET() {
     .orderBy(desc(notifications.createdAt))
     .limit(50);
 
-  return NextResponse.json({ items: rows, db: true });
+  return NextResponse.json({ items: rows });
 }
