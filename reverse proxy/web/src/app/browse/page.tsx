@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import AnimeCard, { AnimeCardSkeleton } from "@/components/AnimeCard";
 import BrowseFilterBar from "@/components/BrowseFilterBar";
 import { type AnimeMedia, type GenreData, api } from "@/lib/api";
+import { anilist } from "@/lib/anilist";
 import { filterAnimeList } from "@/lib/anime-filters";
 import { useEpisodeCountsMap } from "@/hooks/useEpisodeCounts";
 
@@ -36,16 +37,19 @@ function BrowseContent() {
     setLoading(true);
     try {
       const hasQuery = Boolean(query.trim());
-      const params: Record<string, string | number> = { page: p, perPage, sort };
-      if (selectedGenre) params.genre = selectedGenre;
-      if (selectedFormat) params.format = selectedFormat;
-      if (selectedStatus) params.status = selectedStatus;
-      if (selectedSeason) params.season = selectedSeason;
-      if (selectedYear) params.year = parseInt(selectedYear);
+      const yearNum = selectedYear ? parseInt(selectedYear) : undefined;
 
-      const data = hasQuery
-        ? await api.search({ ...params, q: query.trim() })
-        : await api.filter(params);
+      const data = await anilist.search({
+        q: hasQuery ? query.trim() : undefined,
+        page: p,
+        perPage,
+        genre: selectedGenre || undefined,
+        format: selectedFormat || undefined,
+        status: selectedStatus || undefined,
+        season: selectedSeason || undefined,
+        year: yearNum,
+        sort,
+      });
       setResults(filterAnimeList(data.results || []));
       setTotal(data.total || 0);
     } catch (e) {

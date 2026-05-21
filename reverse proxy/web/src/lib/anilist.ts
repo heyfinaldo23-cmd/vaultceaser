@@ -88,6 +88,7 @@ async function gql<T>(query: string, variables?: Record<string, unknown>, cacheK
 
 const LIST_FIELDS = `
   id
+  idMal
   title { romaji english native }
   coverImage { large extraLarge color }
   bannerImage
@@ -433,12 +434,16 @@ export const anilist = {
     const key = `search:${JSON.stringify(params)}`;
     const data = await gql<PageGql>(q, vars, key);
     const p = data.Page;
+    const results = p.media.map((m) => {
+      const raw = m as AnimeMedia & { idMal?: number };
+      return raw.idMal ? { ...m, id: raw.idMal } : m;
+    });
     return {
       page: p.pageInfo.currentPage,
       perPage: p.pageInfo.perPage,
       total: p.pageInfo.total,
       hasNextPage: p.pageInfo.hasNextPage,
-      results: p.media,
+      results,
     };
   },
 
