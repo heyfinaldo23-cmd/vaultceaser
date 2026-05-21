@@ -111,3 +111,5 @@ flowchart TB
 ---
 
 *Solid lines: normal request paths. Dashed lines: optional (catalogue via AniList; CDN proxy only in synthetic/proxy embed modes). Inside the server, `call_pipe` hits `miruro_base` first, then each URL in `pipe_fallback_bases`, skipping bases in the short-lived “dead” state until `pipe_dead_ttl` expires.*
+
+# saturdaynight

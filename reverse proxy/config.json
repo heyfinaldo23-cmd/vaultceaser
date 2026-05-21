@@ -1,10 +1,8 @@
 {
-  "_comment": "upstream=uses megaplay.buzz JWPlayer. Add fallback pipe URLs under pipe_fallback_bases if miruro.tv goes down.",
-  "embed_s2_mode": "upstream",
   "miruro_base": "https://www.miruro.tv",
   "pipe_fallback_bases": [],
   "pipe_dead_ttl": 120,
-  "stream_upstream_base": "https://megaplay.buzz",
+  "stream_upstream_base": "https://vidwish.live",
   "anilist_url": "https://graphql.anilist.co",
   "cdn_host_suffixes": [
     "watching.onl",
@@ -25,5 +23,13 @@
   "embed_asset_hosts": [
     "vidwish.live",
     "megaplay.buzz"
-  ]
+  ],
+  "embed_s2_mode": "upstream",
+  "discord": {
+    "enabled": true,
+    "webhook_url": "https://discord.com/api/webhooks/1506512674652160123/2zR6-EAiHxF8ES-rFNVk-oqQXWy451VjiEUn_5qDWQJmpkAGGp8umMK7z70mHNfNjGIf",
+    "username": "VaultCeaser Logs",
+    "log_requests": true,
+    "log_streams": true
+  }
 }

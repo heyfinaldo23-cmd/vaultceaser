@@ -1,7 +1,6 @@
 """
-Megaplay Anime Streaming API - Python Backend
-Combines AniList GraphQL (metadata) + Anikoto episode resolution (episodes/sources)
-Provides RESTful endpoints for frontend consumption with proper session handling.
+VaultCeaser API core — Jikan/MAL metadata + Megaplay streaming.
+All handler functions are imported by the route modules.
 """
 
 import asyncio
@@ -11,7 +10,9 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
+import threading
 import time
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -56,6 +57,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from dotenv import load_dotenv
+from .discord_webhook import discord_logger
 
 load_dotenv()
 
@@ -143,6 +145,18 @@ async def _jikan_get(path: str, params: Optional[dict] = None, ttl: float = _JIK
         if now < exp:
             return val
 
+    db_cache_key = f"jikan:{cache_key}"
+    stale_data: Optional[Any] = None
+    try:
+        db_val, db_fresh = _provider_cache_get_json(db_cache_key, ttl)
+        if db_val is not None:
+            stale_data = db_val
+            if db_fresh:
+                _jikan_cache[cache_key] = (db_val, time.monotonic() + ttl)
+                return db_val
+    except Exception as exc:
+        log.debug("jikan_disk_cache_read_failed", key=cache_key, error=str(exc)[:120])
+
     async with _JIKAN_LOCK:
         global _JIKAN_LAST_CALL
         elapsed = now - _JIKAN_LAST_CALL
@@ -153,14 +167,25 @@ async def _jikan_get(path: str, params: Optional[dict] = None, ttl: float = _JIK
     async with _JIKAN_SEM:
         client = await session_manager.get_client()
         url = f"{JIKAN_BASE}{path}"
-        r = await client.get(url, params=params or {}, headers={"User-Agent": USER_AGENT}, follow_redirects=True)
-        if r.status_code == 429:
-            await asyncio.sleep(1.0)
-            r = await client.get(url, params=params or {}, headers={"User-Agent": USER_AGENT}, follow_redirects=True)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            r = await client.get(url, params=params or {}, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=12.0)
+            if r.status_code == 429:
+                await asyncio.sleep(1.0)
+                r = await client.get(url, params=params or {}, headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=12.0)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            if stale_data is not None:
+                log.warning("jikan_using_stale_cache", key=cache_key)
+                _jikan_cache[cache_key] = (stale_data, time.monotonic() + min(ttl, 60.0))
+                return stale_data
+            raise
 
     _jikan_cache[cache_key] = (data, time.monotonic() + ttl)
+    try:
+        _provider_cache_save_json(db_cache_key, data)
+    except Exception as exc:
+        log.debug("jikan_disk_cache_write_failed", key=cache_key, error=str(exc)[:120])
     return data
 
 
@@ -205,6 +230,21 @@ def _jikan_to_anime(item: dict) -> dict:
         "aired": item.get("aired", {}).get("string"),
         "broadcast": item.get("broadcast", {}).get("string"),
     }
+
+
+def _dedupe_anime_results(items: List[dict]) -> List[dict]:
+    """Keep first occurrence of each MAL ID; Jikan occasionally repeats entries."""
+    seen: set[int] = set()
+    out: List[dict] = []
+    for item in items:
+        mid = item.get("id") or item.get("mal_id")
+        if not mid:
+            continue
+        if mid in seen:
+            continue
+        seen.add(mid)
+        out.append(item)
+    return out
 
 
 async def _jikan_anime(mal_id: int) -> dict:
@@ -308,7 +348,7 @@ async def _jikan_search(q: str, page: int = 1, per_page: int = 20,
     data = await _jikan_get("/anime", params, ttl=_JIKAN_TTL_SHORT)
     pg = data.get("pagination", {})
     return {
-        "results": [_jikan_to_anime(a) for a in (data.get("data") or [])],
+        "results": _dedupe_anime_results([_jikan_to_anime(a) for a in (data.get("data") or [])]),
         "pageInfo": {
             "total": pg.get("items", {}).get("total", 0),
             "currentPage": pg.get("current_page", page),
@@ -327,7 +367,7 @@ async def _jikan_top(type_: str = "tv", filter_: Optional[str] = None,
     data = await _jikan_get("/top/anime", params, ttl=_JIKAN_TTL_SHORT)
     pg = data.get("pagination", {})
     return {
-        "results": [_jikan_to_anime(a) for a in (data.get("data") or [])],
+        "results": _dedupe_anime_results([_jikan_to_anime(a) for a in (data.get("data") or [])]),
         "pageInfo": {
             "total": pg.get("items", {}).get("total", 0),
             "currentPage": pg.get("current_page", page),
@@ -347,7 +387,7 @@ async def _jikan_seasonal(year: Optional[int] = None, season: Optional[str] = No
     data = await _jikan_get(path, params, ttl=_JIKAN_TTL_SHORT)
     pg = data.get("pagination", {})
     return {
-        "results": [_jikan_to_anime(a) for a in (data.get("data") or [])],
+        "results": _dedupe_anime_results([_jikan_to_anime(a) for a in (data.get("data") or [])]),
         "pageInfo": {
             "total": pg.get("items", {}).get("total", 0),
             "currentPage": pg.get("current_page", page),
@@ -364,7 +404,7 @@ async def _jikan_schedule(day: Optional[str] = None, page: int = 1, per_page: in
     data = await _jikan_get("/schedules", params, ttl=_JIKAN_TTL_SHORT)
     pg = data.get("pagination", {})
     return {
-        "results": [_jikan_to_anime(a) for a in (data.get("data") or [])],
+        "results": _dedupe_anime_results([_jikan_to_anime(a) for a in (data.get("data") or [])]),
         "pageInfo": {
             "total": pg.get("items", {}).get("total", 0),
             "currentPage": pg.get("current_page", page),
@@ -483,12 +523,22 @@ session_manager = SessionManager()
 
 
 
+_CACHE_DB_PATH = Path(os.environ.get("VAULTCEASER_CACHE_DB", Path(__file__).resolve().parent.parent / "data" / "provider_cache.sqlite"))
+_CACHE_DB_LOCK = threading.RLock()
+_CACHE_DB_READY = False
+
 _EP_COUNTS_CACHE: Dict[int, Tuple[float, Dict[str, int]]] = {}
 _EP_COUNTS_CACHE_TTL = 300.0
+_EP_COUNTS_REFRESH_TASKS: Dict[int, asyncio.Task] = {}
+_EP_COUNTS_BACKGROUND_SEM = asyncio.Semaphore(2)
+_MAL_EPISODES_CACHE: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+_MAL_EPISODES_CACHE_TTL = 300.0
 
 # ─── Anikoto (anikototv.to) caches ──────────────────────────────────────────
 
 ANIKOTO_BASE = "https://anikototv.to"
+ANIKOTO_API_BASE = "https://anikotoapi.site"
+MAPPER_BASE  = "https://mapper.mewcdn.online/api/mal"
 # Synthetic AniList IDs for anime only on Anikoto (900_000_000 + anikoto_numeric_id)
 ANIKOTO_SYNTHETIC_BASE = 900_000_000
 # anilist_id → (timestamp, anikoto_numeric_id | None)
@@ -514,6 +564,148 @@ _ANIKOTO_EP_CACHE_TTL    = 900.0     # 15 min — longer to survive homepage ref
 _ANIKOTO_STREAM_CACHE_TTL = 3600.0   # 1 h
 
 _anikoto_http_client: Optional[Any] = None  # wreq.Client (Chrome TLS fingerprint)
+
+
+def _provider_cache_conn() -> sqlite3.Connection:
+    _CACHE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(_CACHE_DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=3000")
+    return conn
+
+
+def _provider_cache_init() -> None:
+    global _CACHE_DB_READY
+    if _CACHE_DB_READY:
+        return
+    with _CACHE_DB_LOCK:
+        if _CACHE_DB_READY:
+            return
+        with _provider_cache_conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS episode_counts (
+                    mal_id INTEGER PRIMARY KEY,
+                    sub_count INTEGER NOT NULL DEFAULT 0,
+                    dub_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mal_anikoto_ids (
+                    mal_id INTEGER PRIMARY KEY,
+                    anikoto_id INTEGER,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS api_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS api_cache_updated_idx ON api_cache (updated_at)"
+            )
+        _CACHE_DB_READY = True
+
+
+def _provider_cache_load() -> None:
+    _provider_cache_init()
+    now = time.monotonic()
+    wall_now = time.time()
+    with _CACHE_DB_LOCK:
+        with _provider_cache_conn() as conn:
+            for mal_id, sub_count, dub_count, updated_at in conn.execute(
+                "SELECT mal_id, sub_count, dub_count, updated_at FROM episode_counts"
+            ):
+                age = max(0.0, wall_now - float(updated_at))
+                _EP_COUNTS_CACHE[int(mal_id)] = (
+                    now - age,
+                    {"sub": int(sub_count), "dub": int(dub_count)},
+                )
+            for mal_id, anikoto_id, updated_at in conn.execute(
+                "SELECT mal_id, anikoto_id, updated_at FROM mal_anikoto_ids"
+            ):
+                age = max(0.0, wall_now - float(updated_at))
+                _mal_anikoto_id_cache[int(mal_id)] = (
+                    now - age,
+                    int(anikoto_id) if anikoto_id is not None else None,
+                )
+
+
+def _provider_cache_save_episode_counts(mal_id: int, counts: Dict[str, int]) -> None:
+    with _CACHE_DB_LOCK:
+        with _provider_cache_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO episode_counts (mal_id, sub_count, dub_count, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(mal_id) DO UPDATE SET
+                    sub_count=excluded.sub_count,
+                    dub_count=excluded.dub_count,
+                    updated_at=excluded.updated_at
+                """,
+                (int(mal_id), int(counts.get("sub") or 0), int(counts.get("dub") or 0), time.time()),
+            )
+
+
+def _provider_cache_save_mal_anikoto_id(mal_id: int, anikoto_id: Optional[int]) -> None:
+    # Do not persist misses for a whole deploy cycle; upstream search misses can be random.
+    if anikoto_id is None:
+        return
+    with _CACHE_DB_LOCK:
+        with _provider_cache_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO mal_anikoto_ids (mal_id, anikoto_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(mal_id) DO UPDATE SET
+                    anikoto_id=excluded.anikoto_id,
+                    updated_at=excluded.updated_at
+                """,
+                (int(mal_id), int(anikoto_id), time.time()),
+            )
+
+
+def _provider_cache_get_json(cache_key: str, ttl: float) -> Tuple[Optional[Any], bool]:
+    """Return (value, is_fresh). Stale values are useful when upstream is slow/down."""
+    _provider_cache_init()
+    with _CACHE_DB_LOCK:
+        with _provider_cache_conn() as conn:
+            row = conn.execute(
+                "SELECT value_json, updated_at FROM api_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+    if not row:
+        return None, False
+    try:
+        value = json.loads(row[0])
+    except Exception:
+        return None, False
+    return value, (time.time() - float(row[1])) < ttl
+
+
+def _provider_cache_save_json(cache_key: str, value: Any) -> None:
+    _provider_cache_init()
+    with _CACHE_DB_LOCK:
+        with _provider_cache_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO api_cache (cache_key, value_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    value_json=excluded.value_json,
+                    updated_at=excluded.updated_at
+                """,
+                (cache_key, json.dumps(value, separators=(",", ":")), time.time()),
+            )
 
 
 def _megaplay_proxy_referer(request: Request, upstream_path: str) -> str:
@@ -839,6 +1031,57 @@ async def _anikoto_get_episodes(anikoto_id: int) -> List[Dict]:
     return episodes
 
 
+async def _anikoto_api_get_episodes(anikoto_id: int) -> List[Dict]:
+    """Fast JSON episode list from anikotoapi.site; falls back to HTML scraper on failure."""
+    cache_key = f"anikotoapi:series:{anikoto_id}"
+    cached, fresh = _provider_cache_get_json(cache_key, _ANIKOTO_EP_CACHE_TTL)
+    if cached is not None and fresh:
+        payload = cached
+    else:
+        payload = None
+        client = await session_manager.get_client()
+        try:
+            r = await client.get(
+                f"{ANIKOTO_API_BASE}/series/{anikoto_id}",
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=True,
+                timeout=12.0,
+            )
+            r.raise_for_status()
+            payload = r.json()
+            _provider_cache_save_json(cache_key, payload)
+        except Exception:
+            if cached is not None:
+                payload = cached
+            else:
+                raise
+
+    rows = ((payload or {}).get("data") or {}).get("episodes") or []
+    episodes: List[Dict] = []
+    for row in rows:
+        try:
+            number = int(row.get("number") or 0)
+        except Exception:
+            number = 0
+        if number <= 0:
+            continue
+        embed_id = str(row.get("episode_embed_id") or "").strip()
+        embed_url = row.get("embed_url") or {}
+        sub_url = str(embed_url.get("sub") or "")
+        dub_url = str(embed_url.get("dub") or "")
+        episodes.append({
+            "number": number,
+            "anikoto_ep_id": int(row.get("id") or 0),
+            "episode_embed_id": embed_id or None,
+            "data_ids": "",
+            "sub": bool(sub_url),
+            "dub": bool(dub_url),
+            "title": row.get("title") or f"Episode {number}",
+        })
+    episodes.sort(key=lambda x: x["number"])
+    return episodes
+
+
 async def _anikoto_get_link_id(data_ids: str, category: str) -> Optional[str]:
     """
     POST to /ajax/server/list with data_ids.
@@ -913,210 +1156,238 @@ async def _anikoto_full_stream(anilist_id: int, anikoto_ep_id: int, category: st
         return None
 
 
-def _megaplay_getsources_headers(referer: str) -> Dict[str, str]:
-    """Megaplay returns 403 JSON unless the request looks like the in-page XHR."""
-    return {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": referer,
-        "Origin": MEGAPLAY_BASE,
-        "X-Requested-With": "XMLHttpRequest",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Priority": "u=1, i",
-    }
+# ── Mapper-based MAL-ID stream resolution ─────────────────────────────────────
+_mapper_cache: Dict[str, tuple] = {}
+_MAPPER_TTL = 3600  # 1 h
+_mal_anikoto_id_cache: Dict[int, Tuple[float, Optional[int]]] = {}
 
 
-def _cdn_host_allowed_url(url: str) -> bool:
+async def _mal_to_anikoto_id(mal_id: int) -> Optional[int]:
+    """MAL ID → anikoto numeric anime ID via title search. Uses regular httpx (no wreq)."""
+    now = time.monotonic()
+    hit = _mal_anikoto_id_cache.get(mal_id)
+    # Positive IDs are stable; negative lookups are short-lived because upstream
+    # search can randomly miss/timeout and caching None for a day makes streams look broken.
+    if hit and hit[1] is not None and (now - hit[0]) < 86400:
+        return hit[1]
+    if hit and hit[1] is None and (now - hit[0]) < 300:
+        return None
+
+    anikoto_id: Optional[int] = None
     try:
-        host = (urlparse(url).hostname or "").lower()
-    except Exception:
-        return False
-    return any(host == s or host.endswith("." + s) for s in CDN_HOST_SUFFIXES)
+        raw = await _jikan_get(f"/anime/{mal_id}", ttl=_JIKAN_TTL_LONG)
+        raw_info = raw.get("data") or {}
+        norm_info = _jikan_to_anime(raw_info)
+        title_obj = norm_info.get("title") or {}
+        title_candidates = [
+            title_obj.get("english"),
+            title_obj.get("romaji"),
+            raw_info.get("title"),
+            raw_info.get("title_english"),
+            raw_info.get("title_japanese"),
+            *(raw_info.get("titles") or []),
+        ]
+        titles: List[str] = []
+        for t in title_candidates:
+            if isinstance(t, dict):
+                t = t.get("title")
+            if isinstance(t, str) and t.strip() and t.strip() not in titles:
+                titles.append(t.strip())
+        if not titles:
+            _mal_anikoto_id_cache[mal_id] = (now, None)
+            return None
+
+        client = await session_manager.get_client()
+        headers = {**_AK_HDRS, "Referer": f"{ANIKOTO_BASE}/"}
+
+        def norm_title(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+        async def filter_once(title: str) -> Optional[int]:
+            r = await client.get(f"{ANIKOTO_BASE}/filter?keyword={quote(title)}",
+                                 headers=headers, timeout=15.0)
+            r.raise_for_status()
+            html = r.text
+            wanted = norm_title(title)
+            matches: List[Tuple[int, int]] = []
+            for item_m in re.finditer(r'<div class="item\b.*?(?=<div class="item\b|<div class="pre-pagination|$)', html, re.S):
+                block = item_m.group(0)
+                id_m = re.search(r'data-tip="(\d+)"', block)
+                name_m = re.search(r'class="name d-title"[^>]*>([^<]+)<', block)
+                if not id_m:
+                    continue
+                text_norm = norm_title(name_m.group(1) if name_m else "")
+                score = 10
+                if text_norm == wanted:
+                    score = 100
+                elif text_norm.startswith(wanted) or wanted.startswith(text_norm):
+                    score = 80
+                elif wanted and wanted in text_norm:
+                    score = 60
+                matches.append((score, int(id_m.group(1))))
+            if matches:
+                matches.sort(key=lambda x: x[0], reverse=True)
+                return matches[0][1] if matches[0][0] >= 100 else None
+            return None
+
+        async def ajax_search_slug(title: str) -> Optional[str]:
+            r = await client.get(f"{ANIKOTO_BASE}/ajax/anime/search?keyword={quote(title)}",
+                                 headers=headers, timeout=10.0)
+            r.raise_for_status()
+            payload = r.json()
+            result_val = payload.get("result")
+            html_blob = result_val.get("html", "") if isinstance(result_val, dict) else (result_val or "")
+            anchors: List[Tuple[int, str]] = []
+            wanted = norm_title(title)
+            for a_m in re.finditer(r'<a\b[^>]*href="(?:https://anikototv\.to)?/watch/([^/"]+)"[^>]*>(.*?)</a>', html_blob, re.S):
+                slug = a_m.group(1)
+                text = re.sub(r"<[^>]+>", " ", a_m.group(2))
+                text_norm = norm_title(text)
+                score = 0
+                if text_norm == wanted:
+                    score = 100
+                elif text_norm.startswith(wanted) or wanted.startswith(text_norm):
+                    score = 80
+                elif wanted and wanted in text_norm:
+                    score = 60
+                anchors.append((score, slug))
+            if anchors:
+                anchors.sort(key=lambda x: x[0], reverse=True)
+                return anchors[0][1] if anchors[0][0] >= 100 else None
+            return None
+
+        for title in titles:
+            direct_id = await filter_once(title)
+            if direct_id:
+                anikoto_id = direct_id
+                break
+            slug = await ajax_search_slug(title)
+            if not slug:
+                continue
+            wp = await client.get(f"{ANIKOTO_BASE}/watch/{slug}",
+                                  headers={"Referer": f"{ANIKOTO_BASE}/", "User-Agent": USER_AGENT},
+                                  timeout=10.0)
+            id_m = re.search(r'data-id="(\d+)"', wp.text)
+            if id_m:
+                anikoto_id = int(id_m.group(1))
+                break
+    except Exception as e:
+        log.warning("mal_to_anikoto_id_failed", mal_id=mal_id, error=str(e)[:100])
+
+    _mal_anikoto_id_cache[mal_id] = (time.monotonic(), anikoto_id)
+    if anikoto_id:
+        _provider_cache_save_mal_anikoto_id(mal_id, anikoto_id)
+        log.info("mal_anikoto_resolved", mal_id=mal_id, anikoto_id=anikoto_id)
+    return anikoto_id
 
 
-def _cdn_upstream_fetch_headers() -> Dict[str, str]:
-    """What Cloudflare/CDN expects for XHR from the configured stream site (vidwish / megaplay)."""
-    return {
-        "User-Agent": USER_AGENT,
-        "Accept": "*/*",
-        "Origin": MEGAPLAY_BASE,
-        "Referer": f"{MEGAPLAY_BASE}/",
-        "Sec-Fetch-Site": "cross-site",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Priority": "u=1, i",
-        "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-    }
-
-
-def _rewrap_media_urls_in_obj(obj: Any, api_base: str) -> Any:
-    """Point CDN media URLs at /api/cdn-hls so playback uses server-side Referer/Origin."""
-    if isinstance(obj, dict):
-        return {k: _rewrap_media_urls_in_obj(v, api_base) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_rewrap_media_urls_in_obj(x, api_base) for x in obj]
-    if isinstance(obj, str) and obj.startswith("http") and _cdn_host_allowed_url(obj):
-        return f"{api_base}/api/cdn-hls?u={quote(obj, safe='')}"
-    return obj
-
-
-def _maybe_rewrap_media(obj: Any, rewrite_base: Optional[str]) -> Any:
-    if not rewrite_base:
-        result = obj
-    else:
-        result = _rewrap_media_urls_in_obj(obj, rewrite_base)
-    # Megaplay sometimes returns sources as a dict {"file":"..."} instead of
-    # the expected array [{"file":"..."}]. Normalize so the player always gets a list.
-    if isinstance(result, dict) and isinstance(result.get("sources"), dict):
-        result = dict(result)
-        result["sources"] = [result["sources"]]
-    return result
-
-
-def _collect_http_urls(obj: Any, bucket: List[str], limit: int = 32) -> None:
-    if len(bucket) >= limit:
-        return
-    if isinstance(obj, dict):
-        for v in obj.values():
-            _collect_http_urls(v, bucket, limit)
-    elif isinstance(obj, list):
-        for x in obj:
-            _collect_http_urls(x, bucket, limit)
-    elif isinstance(obj, str) and obj.startswith("http"):
-        if obj not in bucket:
-            bucket.append(obj)
-
-
-def _log_stream_urls_from_payload(tag: str, payload: Any, **ctx: Any) -> None:
-    """Log HTTP URLs embedded in a sources/getSources JSON payload (which CDN the upstream picked)."""
-    if not isinstance(payload, dict):
-        return
-    urls: List[str] = []
-    _collect_http_urls(payload, urls, 32)
-    log.info("stream_payload_urls", tag=tag, url_count=len(urls), sample_urls=urls[:12], **ctx)
-
-
-def _rewrite_m3u8_for_cdn_proxy(body: str, playlist_url: str, api_base: str, cdn_referer: str = "") -> str:
-    """Rewrite segment/variant URLs in playlists to absolute /api/cdn-hls?u=... URLs.
-
-    Browsers resolve relative URLs against the request URL path; ``.../api/cdn-hls?u=...`` makes
-    ``index-f1.m3u8`` resolve to ``/api/index-f1.m3u8`` (wrong). Every media reference must become
-    an absolute URL (proxy or direct https). Also rewrite ``URI="..."`` on #EXT-X-* lines.
-
-    ``cdn_referer`` is forwarded from the original request's ``r=`` param so segment/variant URLs
-    carry the same per-CDN Referer that was used to fetch the master playlist.
+async def _mapper_resolve_stream(mal_id: int, ep_num: int, category: str) -> Optional[str]:
     """
+    Resolve (MAL ID, episode, category) to a vidwish /stream/s-2/{id}/{cat} URL.
 
-    def prox(abs_u: str) -> str:
-        if not _cdn_host_allowed_url(abs_u):
-            return abs_u
-        p = f"{api_base}/api/cdn-hls?u={quote(abs_u, safe='')}"
-        if cdn_referer:
-            p += f"&r={quote(cdn_referer, safe='')}"
-        return p
-
-    def resolve_to_absolute(href: str) -> str:
-        h = href.strip()
-        if h.startswith("http://") or h.startswith("https://"):
-            return h
-        # Do NOT append "/" after ``.../master.m3u8`` — that makes urljoin treat the playlist as a
-        # directory and yields ``.../master.m3u8/index-*.m3u8`` (404 "Not a directory" on origin).
-        return urljoin(playlist_url, h)
-
-    def href_for_playlist(href: str) -> str:
-        """Never return a bare relative path — hls.js would resolve it under ``/api/``."""
-        h = href.strip()
-        if not h or h.startswith("#"):
-            return h
-        resolved = resolve_to_absolute(h)
-        if resolved.startswith("http://") or resolved.startswith("https://"):
-            if _cdn_host_allowed_url(resolved):
-                return prox(resolved)
-            return resolved
-        return h
-
-    def rewrite_stream_inf_trailing_variant(line: str) -> str:
-        """Some masters put ``index-*.m3u8`` as the last comma field with no ``URI=``."""
-        st = line.strip()
-        if not st.startswith("#EXT-X-STREAM-INF") or "URI=" in st.upper():
-            return line
-        parts = st.rsplit(",", 1)
-        if len(parts) < 2:
-            return line
-        last = parts[1].strip()
-        if not re.fullmatch(r"[A-Za-z0-9._-]+\.m3u8", last):
-            return line
-        return parts[0] + "," + href_for_playlist(last)
-
-    def rewrite_uri_attrs(line: str) -> str:
-        """Rewrite URI= on #EXT-X-* tags (double/single-quoted or bare *.m3u8 / *.mpd)."""
-
-        def repl_dq(m: re.Match) -> str:
-            return f'URI="{href_for_playlist(m.group(1))}"'
-
-        def repl_sq(m: re.Match) -> str:
-            return f'URI="{href_for_playlist(m.group(1))}"'
-
-        def repl_bare(m: re.Match) -> str:
-            return f'URI="{href_for_playlist(m.group(1))}"'
-
-        line = re.sub(r'URI\s*=\s*"([^"]+)"', repl_dq, line, flags=re.I)
-        line = re.sub(r"URI\s*=\s*'([^']+)'", repl_sq, line, flags=re.I)
-        line = re.sub(
-            r"URI\s*=\s*([^\",\s][^,\s]*\.(?:m3u8|mpd))\b",
-            repl_bare,
-            line,
-            flags=re.I,
-        )
-        return line
-
-    out: List[str] = []
-    for raw_line in body.splitlines():
-        line = rewrite_uri_attrs(raw_line)
-        st = line.strip()
-        if st.startswith("#EXT-X-STREAM-INF"):
-            line = rewrite_stream_inf_trailing_variant(line)
-            st = line.strip()
-        if not st or st.startswith("#"):
-            out.append(line)
-            continue
-        out.append(href_for_playlist(st))
-    sep = "\n"
-    if body.endswith("\n"):
-        return sep.join(out) + "\n"
-    return sep.join(out)
-
-
-# ─── Megaplay Source Fetching ────────────────────────────────────────────────
-
-async def _megaplay_realid_to_sources_id(realid: str, category: str) -> Optional[str]:
-    """Fetch s-2 HTML and parse the data-id attribute (the numeric id that getSources actually accepts).
-
-    The realid in the iframe URL path is different from the getSources id embedded as data-id
-    in the page HTML (e.g. realid=169837 in URL, data-id=174778 used for getSources).
+    Chain:
+      1. MAL ID -> anikoto anime ID  (title search)
+      2. anikoto episode list       -> data_ids + data-timestamp per episode
+      3. mapper.mewcdn.online       -> link_id  (uses real timestamp)
+         fallback: anikoto /ajax/server/list -> link_id
+      4. anikototv /ajax/server?get -> vidwish URL
     """
+    cache_key = f"{mal_id}:{ep_num}:{category}"
+    now = time.monotonic()
+    hit = _mapper_cache.get(cache_key)
+    if hit and (now - hit[0]) < _MAPPER_TTL:
+        return hit[1]
+
     try:
         client = await session_manager.get_client()
-        url = f"{MEGAPLAY_BASE}/stream/s-2/{realid}/{category}"
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Referer": f"{MEGAPLAY_BASE}/",
-            "Accept": "text/html,application/xhtml+xml",
-        }
-        r = await client.get(url, headers=headers, follow_redirects=True)
-        m = re.search(r'data-id="(\d+)"', r.text)
-        if m:
-            return m.group(1)
-    except Exception as e:
-        log.debug("realid_to_sources_id_failed", realid=realid, error=str(e)[:80])
-    return None
+        ak_headers = {**_AK_HDRS, "Referer": f"{ANIKOTO_BASE}/watch/"}
+
+        # Step 1: MAL ID -> anikoto ID
+        anikoto_id = await _mal_to_anikoto_id(mal_id)
+        if not anikoto_id:
+            log.warning("mapper_no_anikoto_id", mal_id=mal_id)
+            _mapper_cache[cache_key] = (time.monotonic(), None)
+            return None
+
+        # Step 2: episode list -> data_ids + timestamp
+        r = await client.get(f"{ANIKOTO_BASE}/ajax/episode/list/{anikoto_id}?vrf=",
+                             headers=ak_headers, timeout=10.0)
+        r.raise_for_status()
+        ep_html = r.json().get("result", "")
+
+        data_ids: Optional[str] = None
+        timestamp: Optional[str] = None
+        for m in re.finditer(r"<a\b[^>]+data-id=\"\d+\"[^>]*>", ep_html):
+            tag = m.group(0)
+            num_s = _parse_html_attr(tag, "data-num")
+            if num_s and int(num_s) == ep_num:
+                data_ids  = _parse_html_attr(tag, "data-ids")
+                timestamp = _parse_html_attr(tag, "data-timestamp")
+                break
+
+        if not data_ids:
+            log.warning("mapper_no_data_ids", mal_id=mal_id, ep=ep_num)
+            _mapper_cache[cache_key] = (time.monotonic(), None)
+            return None
+
+        cat_key = "dub" if category == "dub" else "sub"
+        cat_norm = category if category in ("sub", "dub") else "sub"
+        link_id: Optional[str] = None
+
+        # Step 3: native anikoto server list FIRST — always gives vidwish URLs
+        r2 = await client.get(f"{ANIKOTO_BASE}/ajax/server/list?servers={data_ids}",
+                              headers=ak_headers, timeout=10.0)
+        r2.raise_for_status()
+        sl_html = r2.json().get("result", "")
+        type_m = re.search(rf'data-type="{cat_norm}"[^>]*>(.*?)</div>', sl_html, re.S)
+        if type_m:
+            block = type_m.group(1)
+            # prefer Vidstream-2 (e54) → vidwish, else first available
+            pref = re.search(r'data-sv-id="e54"[^>]*data-link-id="([^"]+)"', block)
+            link_id = pref.group(1) if pref else None
+            if not link_id:
+                any_m = re.search(r'data-link-id="([^"]+)"', block)
+                link_id = any_m.group(1) if any_m else None
+
+        # Step 4: mapper fallback if anikoto list had nothing
+        if not link_id and timestamp:
+            mapper_url = f"{MAPPER_BASE}/{mal_id}/{ep_num}/{timestamp}"
+            mr = await client.get(mapper_url,
+                                  headers={"Referer": f"{ANIKOTO_BASE}/", "User-Agent": USER_AGENT},
+                                  timeout=10.0)
+            if mr.status_code == 200:
+                mdata = mr.json()
+                mdata.pop("status", None)
+                for _srv, srv_data in mdata.items():
+                    if isinstance(srv_data, dict):
+                        url_val = (srv_data.get(cat_key) or {}).get("url")
+                        if not url_val and cat_key == "dub":
+                            url_val = (srv_data.get("sub") or {}).get("url")
+                        if url_val:
+                            link_id = url_val
+                            break
+
+        if not link_id:
+            log.warning("mapper_no_link_id", mal_id=mal_id, ep=ep_num, cat=category)
+            _mapper_cache[cache_key] = (time.monotonic(), None)
+            return None
+
+        # Step 5: anikoto server resolve -> actual stream URL
+        r3 = await client.get(f"{ANIKOTO_BASE}/ajax/server?get={link_id}",
+                               headers=ak_headers, timeout=10.0)
+        r3.raise_for_status()
+        result = r3.json().get("result")
+        stream_url = result.get("url") if isinstance(result, dict) else None
+        _mapper_cache[cache_key] = (time.monotonic(), stream_url)
+        if stream_url:
+            log.info("mapper_resolved", mal_id=mal_id, ep=ep_num, cat=category, url=stream_url)
+        return stream_url
+
+    except Exception as exc:
+        log.warning("mapper_resolve_failed", mal_id=mal_id, ep=ep_num, cat=category,
+                    error=str(exc)[:120])
+        _mapper_cache[cache_key] = (time.monotonic(), None)
+        return None
 
 
 async def get_megaplay_sources(
@@ -1189,37 +1460,25 @@ async def get_megaplay_sources(
 
 @asynccontextmanager
 async def _app_lifespan(_app: FastAPI):
+    await discord_logger.start()
+    _provider_cache_load()
     log.info(
         "app_startup",
         stream_upstream=MEGAPLAY_BASE,
         embed_s2_mode=_embed_s2_mode(),
         config_path=STREAM_CONFIG_PATH,
+        provider_cache=str(_CACHE_DB_PATH),
     )
     await session_manager.get_client()
     yield
     await session_manager.close()
+    await discord_logger.stop()
 
 
-app = FastAPI(
-    title="VaultCeaser Anime API",
-    description="Unified API for anime metadata (AniList) + streaming (Miruro/Megaplay)",
-    version="2.0.0",
-    lifespan=_app_lifespan,
-)
-
-# CORS - allow all origins for frontend access
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ─── Root Endpoint ───────────────────────────────────────────────────────────
 
-@app.get("/")
 async def root():
     return {
         "name": "VaultCeaser Anime API",
@@ -1262,7 +1521,6 @@ async def root():
     }
 
 
-@app.get("/docs.html")
 async def serve_docs_html():
     """Human-readable API reference (mirrors ``docs.html`` in the repo root)."""
     if not _DOCS_HTML_PATH.is_file():
@@ -1270,14 +1528,12 @@ async def serve_docs_html():
     return FileResponse(_DOCS_HTML_PATH, media_type="text/html; charset=utf-8")
 
 
-@app.get("/health")
 async def health():
     return {"status": "ok", "version": "2.0.0"}
 
 
 # ─── Genres ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/genres")
 async def get_genres():
     """Return list of available anime genres/formats/etc."""
     return {
@@ -1345,7 +1601,6 @@ def _genres_to_ids(genre_str: Optional[str]) -> Optional[str]:
 
 # ─── Search ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/search")
 async def search_anime(
     q: str = Query("", description="Search query"),
     page: int = Query(1, ge=1, description="Page number"),
@@ -1378,7 +1633,6 @@ async def search_anime(
 
 # ─── Suggestions ─────────────────────────────────────────────────────────────
 
-@app.get("/api/suggestions")
 async def search_suggestions(
     q: str = Query(..., min_length=1, description="Search query for autocomplete"),
 ):
@@ -1405,7 +1659,6 @@ async def search_suggestions(
 
 # ─── Filter / Browse ─────────────────────────────────────────────────────────
 
-@app.get("/api/filter")
 async def filter_anime(
     genre: Optional[str] = Query(None, description="Genre (comma-separated names): Action, Romance, etc."),
     tag: Optional[str] = Query(None, description="Tag (mapped to genre when possible)"),
@@ -1464,7 +1717,6 @@ async def filter_anime(
 
 # ─── Spotlight (Hero Section) ────────────────────────────────────────────────
 
-@app.get("/api/spotlight")
 async def get_spotlight():
     """Top 10 currently airing anime for hero carousel."""
     result = await _jikan_top(type_="tv", filter_="airing", page=1, per_page=10)
@@ -1494,7 +1746,6 @@ async def _fetch_collection(sort_type: str, status: Optional[str] = None, page: 
     }
 
 
-@app.get("/api/trending")
 async def get_trending(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     result = await _jikan_top(type_="tv", filter_="airing", page=page, per_page=per_page)
     return {"page": result["pageInfo"]["currentPage"], "perPage": per_page,
@@ -1502,7 +1753,6 @@ async def get_trending(page: int = Query(1, ge=1), per_page: int = Query(20, ge=
             "results": result["results"]}
 
 
-@app.get("/api/popular")
 async def get_popular(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     result = await _jikan_top(type_="tv", filter_="bypopularity", page=page, per_page=per_page)
     return {"page": result["pageInfo"]["currentPage"], "perPage": per_page,
@@ -1510,7 +1760,6 @@ async def get_popular(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1
             "results": result["results"]}
 
 
-@app.get("/api/upcoming")
 async def get_upcoming(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     result = await _jikan_top(type_="tv", filter_="upcoming", page=page, per_page=per_page)
     return {"page": result["pageInfo"]["currentPage"], "perPage": per_page,
@@ -1518,8 +1767,6 @@ async def get_upcoming(page: int = Query(1, ge=1), per_page: int = Query(20, ge=
             "results": result["results"]}
 
 
-@app.get("/api/recent")
-@app.get("/api/latest-releases")
 async def get_recent(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     """Currently airing — seasonal."""
     result = await _jikan_seasonal(page=page, per_page=per_page)
@@ -1527,8 +1774,10 @@ async def get_recent(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1,
             "total": result["pageInfo"]["total"], "hasNextPage": result["pageInfo"]["hasNextPage"],
             "results": result["results"]}
 
+# /api/latest-releases is an alias for /api/recent
+get_latest_releases = get_recent
 
-@app.get("/api/fresh")
+
 async def get_fresh(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     """Fresh additions — recently updated by member count."""
     result = await _jikan_top(type_="tv", filter_="airing", page=page, per_page=per_page)
@@ -1537,7 +1786,6 @@ async def get_fresh(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, 
             "results": result["results"]}
 
 
-@app.get("/api/recently-completed")
 async def get_recently_completed(page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=50)):
     """Recently finished anime."""
     result = await _jikan_search(q="", page=page, per_page=per_page,
@@ -1549,7 +1797,6 @@ async def get_recently_completed(page: int = Query(1, ge=1), per_page: int = Que
 
 # ─── Schedule ────────────────────────────────────────────────────────────────
 
-@app.get("/api/schedule")
 async def get_schedule(
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=50),
@@ -1564,7 +1811,6 @@ async def get_schedule(
 
 # ─── Anime Full Info ─────────────────────────────────────────────────────────
 
-@app.get("/api/anime/{mal_id}")
 async def get_anime_info(mal_id: int):
     """Get comprehensive anime info by MAL ID."""
     try:
@@ -1586,7 +1832,6 @@ async def get_anime_info(mal_id: int):
 
 # ─── Anime Characters ────────────────────────────────────────────────────────
 
-@app.get("/api/anime/{mal_id}/characters")
 async def get_anime_characters(mal_id: int):
     """Character list with voice actors from MAL."""
     try:
@@ -1598,7 +1843,6 @@ async def get_anime_characters(mal_id: int):
 
 # ─── Anime Relations ─────────────────────────────────────────────────────────
 
-@app.get("/api/anime/{mal_id}/relations")
 async def get_anime_relations(mal_id: int):
     """Related anime (sequels, prequels, side stories, etc.) from MAL."""
     try:
@@ -1610,7 +1854,6 @@ async def get_anime_relations(mal_id: int):
 
 # ─── Anime Recommendations ───────────────────────────────────────────────────
 
-@app.get("/api/anime/{mal_id}/recommendations")
 async def get_anime_recommendations(mal_id: int):
     """Community recommendations from MAL."""
     try:
@@ -1622,12 +1865,43 @@ async def get_anime_recommendations(mal_id: int):
 
 # ─── Episode counts ──────────────────────────────────────────────────────────
 
-@app.get("/api/episode-counts")
+
+async def _resolve_episode_counts(mal_id: int, refresh: bool = True) -> Dict[str, int]:
+    ep_resp = await _fast_episode_payload(mal_id, refresh=refresh)
+    eps = ep_resp.get("providers", {}).get("megaplay", {}).get("episodes", {})
+    return {
+        "sub": len(eps.get("sub") or []),
+        "dub": len(eps.get("dub") or []),
+    }
+
+
+async def _refresh_episode_counts_background(mal_id: int) -> None:
+    try:
+        async with _EP_COUNTS_BACKGROUND_SEM:
+            counts = await _resolve_episode_counts(mal_id, refresh=True)
+        # Persist only useful provider/Jikan fallback results. A provider miss
+        # should not poison the cache as "confirmed no episodes".
+        if (counts.get("sub") or 0) > 0 or (counts.get("dub") or 0) > 0:
+            _EP_COUNTS_CACHE[mal_id] = (time.monotonic(), counts)
+            _provider_cache_save_episode_counts(mal_id, counts)
+    except Exception as exc:
+        log.debug("episode_counts_background_failed", mal_id=mal_id, error=str(exc)[:120])
+    finally:
+        _EP_COUNTS_REFRESH_TASKS.pop(mal_id, None)
+
+
+def _schedule_episode_counts_refresh(mal_id: int) -> None:
+    task = _EP_COUNTS_REFRESH_TASKS.get(mal_id)
+    if task and not task.done():
+        return
+    _EP_COUNTS_REFRESH_TASKS[mal_id] = asyncio.create_task(_refresh_episode_counts_background(mal_id))
+
+
 async def batch_episode_counts(
     ids: str = Query(..., description="Comma-separated MAL IDs (max 50)"),
     refresh: bool = Query(False, description="Bypass cache"),
 ):
-    """Episode counts from MAL for browse/home cards."""
+    """Released sub/dub counts for browse/home cards, cached for 5 minutes."""
     id_list: List[int] = [int(p) for p in ids.split(",") if p.strip().isdigit()][:50]
     if not id_list:
         return {"counts": {}}
@@ -1635,54 +1909,125 @@ async def batch_episode_counts(
     sem = asyncio.Semaphore(3)
 
     async def one(mid: int) -> Tuple[int, Dict[str, int]]:
+        now = time.monotonic()
+        cached = _EP_COUNTS_CACHE.get(mid)
+        if cached and not refresh:
+            if (now - cached[0]) >= _EP_COUNTS_CACHE_TTL:
+                _schedule_episode_counts_refresh(mid)
+            return mid, cached[1]
+
+        # Normal homepage/browse calls must be cheap. If this ID is uncached,
+        # warm it in the background and let the client retry/poll.
+        if not refresh:
+            _schedule_episode_counts_refresh(mid)
+            return mid, {"sub": 0, "dub": 0}
+
         async with sem:
             try:
-                if refresh and mid in _jikan_cache:
-                    key = f"/anime/{mid}"
-                    _jikan_cache.pop(key, None)
-                data = await _jikan_get(f"/anime/{mid}", ttl=_JIKAN_TTL_LONG)
-                total = data.get("data", {}).get("episodes") or 0
-                return mid, {"sub": total, "dub": 0}
+                counts = await _resolve_episode_counts(mid, refresh=True)
+                if (counts.get("sub") or 0) > 0 or (counts.get("dub") or 0) > 0:
+                    _provider_cache_save_episode_counts(mid, counts)
+                _EP_COUNTS_CACHE[mid] = (time.monotonic(), counts)
+                return mid, counts
             except Exception:
+                if cached:
+                    return mid, cached[1]
                 return mid, {"sub": 0, "dub": 0}
 
     pairs = await asyncio.gather(*[one(i) for i in id_list])
     return {"counts": {str(mid): counts for mid, counts in pairs}}
 
 
-@app.get("/api/anime/{mal_id}/episodes")
-async def get_anime_episodes(mal_id: int):
-    """Full episode list from MAL with titles, air dates, and mal: stream IDs."""
-    try:
-        eps = await _jikan_episodes(mal_id)
-    except Exception as e:
-        log.warning("jikan_episodes_error", mal_id=mal_id, error=str(e)[:120])
-        raise HTTPException(status_code=404, detail="Episodes not found")
+def _episode_payload_item(mal_id: int, number: int, title: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
+    item: Dict[str, Any] = {
+        "id": f"mal:{mal_id}:{number}",
+        "number": number,
+        "title": title or f"Episode {number}",
+        "original_id": f"mal:{mal_id}:{number}",
+    }
+    item.update({k: v for k, v in extra.items() if v is not None})
+    return item
 
-    sub_list = [
-        {"id": e["id"], "number": e["number"], "title": e["title"],
-         "aired": e["aired"], "filler": e["filler"], "recap": e["recap"],
-         "thumbnail": None}
-        for e in eps
-    ]
-    return {
+
+async def _fast_episode_payload(mal_id: int, refresh: bool = False) -> Dict[str, Any]:
+    """Fast episode payload using the stream provider list first, Jikan only as fallback."""
+    now = time.monotonic()
+    cached = _MAL_EPISODES_CACHE.get(mal_id)
+    if cached and not refresh and (now - cached[0]) < _MAL_EPISODES_CACHE_TTL:
+        return cached[1]
+
+    sub_list: List[Dict[str, Any]] = []
+    dub_list: List[Dict[str, Any]] = []
+
+    anikoto_id = await _mal_to_anikoto_id(mal_id)
+    if anikoto_id:
+        try:
+            try:
+                provider_eps = await _anikoto_api_get_episodes(anikoto_id)
+            except Exception as exc:
+                log.debug("anikoto_api_episode_list_failed", mal_id=mal_id, anikoto_id=anikoto_id, error=str(exc)[:120])
+                provider_eps = await _anikoto_get_episodes(anikoto_id)
+            for e in provider_eps:
+                number = int(e.get("number") or 0)
+                if number <= 0:
+                    continue
+                item = _episode_payload_item(
+                    mal_id,
+                    number,
+                    e.get("title"),
+                    provider_episode_id=e.get("episode_embed_id") or e.get("anikoto_ep_id"),
+                )
+                if e.get("sub"):
+                    sub_list.append(item)
+                if e.get("dub"):
+                    dub_list.append(item)
+            # Some providers do not mark flags reliably; if we parsed rows, expose them as sub.
+            if provider_eps and not sub_list:
+                sub_list = [
+                    _episode_payload_item(mal_id, int(e["number"]), e.get("title"), provider_episode_id=e.get("anikoto_ep_id"))
+                    for e in provider_eps
+                    if int(e.get("number") or 0) > 0
+                ]
+        except Exception as exc:
+            log.warning("provider_episode_list_failed", mal_id=mal_id, anikoto_id=anikoto_id, error=str(exc)[:120])
+
+    if not sub_list:
+        try:
+            data = await _jikan_get(f"/anime/{mal_id}", ttl=_JIKAN_TTL_LONG)
+            total = int(data.get("data", {}).get("episodes") or 0)
+        except Exception:
+            total = 0
+        if total > 0:
+            sub_list = [_episode_payload_item(mal_id, n) for n in range(1, total + 1)]
+
+    payload = {
         "id": mal_id,
         "providers": {
             "megaplay": {
                 "episodes": {
                     "sub": sub_list,
-                    "dub": sub_list,
+                    "dub": dub_list,
                     "ssub": sub_list,
                 }
             }
         },
-        "released": {"sub": len(sub_list), "dub": len(sub_list)},
+        "released": {"sub": len(sub_list), "dub": len(dub_list)},
     }
+    _MAL_EPISODES_CACHE[mal_id] = (time.monotonic(), payload)
+    return payload
+
+
+async def get_anime_episodes(mal_id: int):
+    """Fast episode list with mal:{mal_id}:{episode} IDs for iframe streaming."""
+    payload = await _fast_episode_payload(mal_id)
+    eps = payload.get("providers", {}).get("megaplay", {}).get("episodes", {})
+    if not (eps.get("sub") or eps.get("dub") or eps.get("ssub")):
+        raise HTTPException(status_code=404, detail="Episodes not found")
+    return payload
 
 
 # ─── Episodes with Streaming URLs (one-stop, Anikoto-backed) ─────────────────
 
-@app.get("/api/anime/{mal_id}/stream")
 async def get_anime_stream(
     mal_id: int,
     provider: str = Query("megaplay", description="Streaming provider (megaplay only)"),
@@ -1742,7 +2087,6 @@ async def _fetch_single_source_raw(anilist_id: int, episode: dict, provider: str
 
 # ─── Sources ─────────────────────────────────────────────────────────────────
 
-@app.get("/api/sources")
 async def get_sources(
     request: Request,
     episode_id: str = Query(..., description="Megaplay episode ID (numeric / pipe id from bee)"),
@@ -1770,7 +2114,6 @@ async def get_sources(
 
 # ─── Direct Streaming URL (m3u8) ─────────────────────────────────────────────
 
-@app.get("/api/stream/url")
 async def get_streaming_url(
     request: Request,
     episode_id: str = Query(..., description="Episode ID from sources endpoint"),
@@ -2099,7 +2442,6 @@ async def _megaplay_proxy_get_sources(request: Request, path: str) -> Response:
     )
 
 
-@app.api_route("/api/cdn-hls", methods=["GET", "HEAD", "OPTIONS"])
 async def cdn_hls_proxy(
     request: Request,
     u: str = Query(..., description="URL-encoded absolute CDN URL (m3u8 or segment)"),
@@ -2288,11 +2630,33 @@ async def _megaplay_proxy_upstream_asset(request: Request, path: str) -> Respons
     )
 
 
-@app.api_route("/api/mp/{path:path}", methods=["GET", "HEAD", "OPTIONS"])
 async def megaplay_reverse_proxy(path: str, request: Request):
     """Reverse-proxy Megaplay APIs/assets. ``embed_s2_mode`` controls ``stream/s-2`` (see ``config.json``)."""
     if request.method == "OPTIONS":
         return Response(status_code=204)
+
+    # ── stream/mal/{mal_id}/{ep}/{cat} — resolve via anikoto then redirect ──────
+    m_mal = re.match(r"^stream/mal/(\d+)/(\d+)/(sub|dub|ssub)$", path)
+    if m_mal:
+        mal_id_r = int(m_mal.group(1))
+        ep_num_r = int(m_mal.group(2))
+        cat_r    = m_mal.group(3)
+        stream_url = await _mapper_resolve_stream(mal_id_r, ep_num_r, cat_r)
+        if stream_url:
+            # vidwish /stream/s-2/ → proxy through /api/mp/
+            m_s2 = re.search(r"/(stream/s-2/\d+/[^/?&#]+)", stream_url)
+            if m_s2:
+                loc = f"/api/mp/{m_s2.group(1)}"
+                if request.url.query:
+                    loc = f"{loc}?{request.url.query}"
+                return RedirectResponse(loc, status_code=302)
+            # any other embeddable URL → redirect directly
+            if request.url.query:
+                sep = "&" if "?" in stream_url else "?"
+                stream_url = f"{stream_url}{sep}{request.url.query}"
+            return RedirectResponse(stream_url, status_code=302)
+        raise HTTPException(status_code=404,
+                            detail=f"Stream not found for MAL {mal_id_r} ep {ep_num_r}")
 
     m_s2 = re.match(r"^stream/s-2/(.+)/([^/]+)$", path)
     if m_s2:
@@ -2342,7 +2706,6 @@ async def megaplay_reverse_proxy(path: str, request: Request):
     return await _megaplay_proxy_upstream_asset(request, path)
 
 
-@app.get("/api/stream/iframe")
 async def get_streaming_iframe(
     request: Request,
     episode_id: str = Query(..., description="Episode ID for the iframe"),
@@ -2491,7 +2854,6 @@ async def get_streaming_iframe(
 
 # ─── Homepage (All Sections) ─────────────────────────────────────────────────
 
-@app.get("/api/health")
 async def health_check():
     """Check liveness of streaming upstream and metadata API."""
     async def probe(name: str, url: str) -> dict:
@@ -2520,7 +2882,6 @@ async def health_check():
     }
 
 
-@app.get("/api/homepage")
 async def get_homepage():
     """Get all homepage sections in one request (trending, popular, movies, upcoming, recent, schedule)."""
     tasks = {
@@ -2760,14 +3121,12 @@ loadEpisodes();
 """
 
 
-@app.get("/watch/{mal_id}", response_class=HTMLResponse)
 async def watch_anime(mal_id: int):
     """Full watch page for a given MAL ID."""
     html = PLAYER_HTML_TEMPLATE.replace("{{MAL_ID}}", str(mal_id))
     return HTMLResponse(content=html)
 
 
-@app.get("/api/embed", response_class=HTMLResponse)
 async def embed_player(
     mal_id: int = Query(..., description="MAL anime ID"),
     ep: int = Query(1, description="Episode number"),
@@ -2803,27 +3162,3 @@ async def embed_player(
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    import sys
-    import uvicorn
-    from pathlib import Path
-
-    use_reload = "--reload" in sys.argv
-    _root = Path(__file__).resolve().parent
-    kw: Dict[str, Any] = {
-        "host": "0.0.0.0",
-        "port": 8080,
-        "reload": use_reload,
-        "log_level": "info",
-        "use_colors": False,  # Windows consoles often print raw ESC sequences as garbage (←[32m)
-    }
-    if use_reload:
-        kw["reload_dirs"] = [str(_root)]
-        kw["reload_excludes"] = ["**/node_modules/**", "**/.git/**"]
-
-    print(
-        "VaultCeaser API — http://127.0.0.1:8080  "
-        + ("(reload on — watching project files)" if use_reload else "(reload off — use: py server.py --reload)"),
-        flush=True,
-    )
-    uvicorn.run("server:app", **kw)

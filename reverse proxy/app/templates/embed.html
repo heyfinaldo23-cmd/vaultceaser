@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Stream</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<link rel="stylesheet" href="/static/embed.css">
+</head><body>
+<script type="application/json" id="vault-embed-cfg">{{ embed_cfg_json | safe }}</script>
+<video id="v" controls playsinline crossorigin="anonymous"></video>
+<div id="err" style="display:none"></div>
+<script src="/static/embed.js"></script>
+</body></html>

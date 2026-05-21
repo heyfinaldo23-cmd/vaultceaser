@@ -13,6 +13,13 @@ web/.next/
 web/out/
 web/.env.local
 web/.env*.local
+reverse proxy/web/.next/
+reverse proxy/web/out/
+reverse proxy/web/.env
+reverse proxy/web/.env.local
+reverse proxy/web/.env*.local
+reverse proxy/web/drizzle/
+reverse proxy/web/doocs.txt
 
 # OS
 .DS_Store
@@ -26,6 +33,10 @@ scripts/
 .codex/
 ayush/
 *.har
+*.zip
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 "New Text Document.txt"
 New Text Document.txt
 p.txt

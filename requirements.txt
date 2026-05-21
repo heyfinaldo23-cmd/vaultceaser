@@ -4,3 +4,4 @@ httpx
 structlog>=24.1.0
 colorama>=0.4.6
 wreq
+jinja2

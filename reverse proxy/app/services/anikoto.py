@@ -1,0 +1,1 @@
+"""Anikoto service extraction target."""
