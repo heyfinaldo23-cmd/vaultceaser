@@ -9,9 +9,11 @@ import {
   parseSearchJson,
   parseWatchPage,
   parseFilterPage,
+  parseSeasonsHtml,
   type AkEpisodeData,
   type AkFilterItem,
   type AkSearchResult,
+  type AkSeasonEntry,
   type AkWatchInfo,
 } from "./anikoto";
 
@@ -314,4 +316,15 @@ export async function akFetchFilter(params: {
   if (!html) return [];
   return parseFilterPage(html);
 }
+
+/**
+ * Fetch the seasons rail for an Anikoto anime ID.
+ * Returns ordered season entries with name, slug, banner.
+ */
+export async function akFetchSeasons(anikotoId: number): Promise<AkSeasonEntry[]> {
+  const raw = await proxyFetch(`/api/seasons/${anikotoId}`);
+  if (!raw) return [];
+  return parseSeasonsHtml(raw);
+}
+
 

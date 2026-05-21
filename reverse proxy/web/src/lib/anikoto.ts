@@ -315,6 +315,39 @@ export function akScoreTo100(score: number): number {
   return Math.round(score * 10);
 }
 
+// ─── seasons ─────────────────────────────────────────────────────────────────
+
+export interface AkSeasonEntry {
+  name: string;
+  slug: string;
+  banner: string;
+  active: boolean;
+}
+
+/**
+ * Parses /api/seasons/{id} JSON response.
+ * Returns slug + display name for each season so we can build the season rail.
+ */
+export function parseSeasonsHtml(raw: string): AkSeasonEntry[] {
+  let html = raw;
+  try {
+    const obj = JSON.parse(raw) as { result?: string };
+    if (typeof obj.result === "string") html = obj.result;
+  } catch { /* raw HTML */ }
+
+  const doc = parseDoc(html);
+  return Array.from(doc.querySelectorAll(".season")).map((el) => {
+    const a = el.querySelector("a");
+    const href = a?.getAttribute("href") ?? "";
+    const slug = slugFromUrl(href);
+    const name = textOf(el.querySelector(".name")).trim();
+    const style = (a as HTMLElement | null)?.style?.backgroundImage ?? "";
+    const banner = style.match(/url\(["']?(.+?)["']?\)/)?.[1] ?? "";
+    const active = el.classList.contains("active");
+    return { name, slug, banner, active };
+  }).filter((s) => Boolean(s.slug && s.name));
+}
+
 // ─── filter page ─────────────────────────────────────────────────────────────
 
 /**
@@ -346,6 +379,18 @@ export function parseFilterPage(html: string): AkFilterItem[] {
       const totalText = textOf(item.querySelector(".ep-status.total span"));
       const totalCount = totalText ? parseInt(totalText, 10) || null : null;
 
+      // Fallback: m-item labels (present in some filter page layouts)
+      let subFallback = subCount;
+      let dubFallback = dubCount;
+      if (!subFallback && !dubFallback) {
+        for (const mi of Array.from(item.querySelectorAll(".m-item"))) {
+          const label = textOf(mi.querySelector("label")).toLowerCase();
+          const val = parseInt(textOf(mi.querySelector("span")), 10) || 0;
+          if (label.includes("sub") && !subFallback) subFallback = val;
+          if (label.includes("dub") && !dubFallback) dubFallback = val;
+        }
+      }
+
       const type = textOf(item.querySelector(".meta .inner .right, .meta .right"));
 
       const scoreText = textOf(item.querySelector(".m-item.rated span"));
@@ -355,7 +400,7 @@ export function parseFilterPage(html: string): AkFilterItem[] {
         .map((a) => textOf(a).trim())
         .filter(Boolean);
 
-      return { title, native, slug, anikotoId, poster, subCount, dubCount, totalCount, type, score, genres };
+      return { title, native, slug, anikotoId, poster, subCount: subFallback, dubCount: dubFallback, totalCount, type, score, genres };
     })
     .filter((item) => Boolean(item.title && item.slug));
 }

@@ -256,16 +256,32 @@ const META_HOST = "anikototv.to";
 const META_ORIGIN = `https://${META_HOST}`;
 const STRIP_HEADERS = new Set(["cf-ray", "cf-cache-status", "server", "via", "x-powered-by", "x-frame-options", "set-cookie"]);
 
+const AK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+const AK_SEC_CH_UA = '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"';
+
+function akHeaders(path: string): Record<string, string> {
+  const isAjax = path.includes("/ajax/") || path.includes("/api/");
+  return {
+    "User-Agent": AK_UA,
+    "Accept": isAjax
+      ? "application/json, text/javascript, */*; q=0.01"
+      : "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": `${META_ORIGIN}/`,
+    "sec-ch-ua": AK_SEC_CH_UA,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-mode": isAjax ? "cors" : "navigate",
+    "sec-fetch-dest": isAjax ? "empty" : "document",
+    ...(isAjax ? { "X-Requested-With": "XMLHttpRequest" } : {}),
+  };
+}
+
 async function metaProxy(target: string) {
   if (!target || !target.startsWith("/")) return notFound();
   const res = await fetch(`${META_ORIGIN}${target}`, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Referer": `${META_ORIGIN}/`,
-      "X-Requested-With": "XMLHttpRequest",
-      "Accept": "text/html,application/json,*/*;q=0.9",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
+    headers: akHeaders(target),
     cache: "no-store",
   });
   const body = await res.text();

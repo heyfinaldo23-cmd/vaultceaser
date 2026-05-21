@@ -58,15 +58,24 @@ export async function GET(request: Request) {
   if (res.ok && isM3U8(ct, targetU)) {
     const text = await res.text();
 
-    // Replace absolute backend URLs with the same-origin URL so HLS.js
-    // fetches segment/variant requests through Next.js proxy, not cross-origin.
     const requestOrigin = url.origin;
-    const rewritten = text
+    // Rewrite backend-origin URLs (legacy path)
+    let rewritten = text
       .replaceAll(BACKEND_ORIGIN, requestOrigin)
       .replaceAll("http://0.0.0.0:3456", requestOrigin)
       .replaceAll("http://127.0.0.1:8080", requestOrigin)
       .replaceAll("http://localhost:8080", requestOrigin)
       .replace(/https?:\/\/(?:0\.0\.0\.0|127\.0\.0\.1|localhost)(?::\d+)?\/api\//g, "/api/");
+
+    // Rewrite any absolute CDN segment/playlist URLs through our proxy
+    // so clients never hit CDN hosts directly (avoids Cloudflare bot checks)
+    rewritten = rewritten.replace(
+      /(https?:\/\/(?!(?:localhost|127\.0\.0\.1|0\.0\.0\.0))[^\s"',]+\.(?:ts|jpg|jpeg|m3u8|vtt|mp4)(?:[?#][^\s"',]*)?)/gi,
+      (match) => {
+        if (match.startsWith(requestOrigin)) return match;
+        return `${requestOrigin}/api/cdn-hls?u=${encodeURIComponent(match)}`;
+      }
+    );
 
     return new Response(rewritten, {
       status: res.status,
