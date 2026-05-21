@@ -11,6 +11,7 @@ import {
   staticSearch,
   staticSection,
   staticSuggestions,
+  resolveByTitle,
 } from "@/lib/static-catalog";
 import { fetchJikanRelationEdges } from "@/lib/jikan-relations";
 import { fetchAnilistByMalId } from "@/lib/anilist-server";
@@ -54,34 +55,6 @@ function sectionKey(pathname: string) {
   }
 }
 
-async function fetchBackendEpisodeCounts(searchParams: URLSearchParams) {
-  const qs = searchParams.toString();
-  try {
-    const res = await fetch(`${BACKEND}/api/episode-counts?${qs}`, {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as { counts?: Record<string, { sub?: number; dub?: number }> };
-  } catch {
-    return null;
-  }
-}
-
-function mergeEpisodeCounts(
-  staticData: { counts: Record<string, { sub: number; dub: number }> },
-  backendData: { counts?: Record<string, { sub?: number; dub?: number }> } | null
-) {
-  const merged = { ...staticData.counts };
-  for (const [key, backend] of Object.entries(backendData?.counts || {})) {
-    const s = merged[key] || { sub: 0, dub: 0 };
-    merged[key] = {
-      sub: Math.max(s.sub, backend?.sub ?? 0),
-      dub: Math.max(s.dub, backend?.dub ?? 0),
-    };
-  }
-  return { counts: merged };
-}
 
 /**
  * Enrich a static AnimeMedia entry with AniList data.
@@ -323,9 +296,18 @@ export async function GET(request: Request, context: RouteContext) {
   if (pathname === "schedule") return json({ page: 1, perPage: 20, total: 0, hasNextPage: false, results: [] });
 
   if (pathname === "episode-counts") {
-    const staticCounts = staticEpisodeCounts(url.searchParams);
-    const backendCounts = await fetchBackendEpisodeCounts(url.searchParams);
-    return json(mergeEpisodeCounts(staticCounts, backendCounts));
+    return json(staticEpisodeCounts(url.searchParams));
+  }
+
+  if (pathname === "resolve-titles") {
+    const raw = url.searchParams.get("titles") ?? "";
+    const titles = raw.split("|").map((t) => t.trim()).filter(Boolean);
+    const result: Record<string, number> = {};
+    for (const t of titles) {
+      const m = resolveByTitle(t);
+      if (m?.id) result[t] = m.id;
+    }
+    return json(result);
   }
 
   const collection = sectionKey(pathname);

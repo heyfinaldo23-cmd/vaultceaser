@@ -280,3 +280,40 @@ export function staticMeta() {
     detailed: allMedia.filter((item) => item.staticDetailed).length,
   };
 }
+
+/**
+ * Find the best catalog entry matching a title string.
+ * Used server-side to map Anikoto titles → MAL IDs.
+ * Scoring: exact match > starts-with > contains > all-words match.
+ */
+export function resolveByTitle(title: string): AnimeMedia | undefined {
+  if (!title) return undefined;
+  const q = normalize(title);
+  if (!q) return undefined;
+
+  let best: { score: number; item: AnimeMedia } | null = null;
+
+  for (const item of allMedia) {
+    const eng = normalize(item.title?.english ?? "");
+    const rom = normalize(item.title?.romaji ?? "");
+    const all = normalize(titleText(item));
+
+    let s = 0;
+    if (eng === q || rom === q) s = 1000;
+    else if (eng.startsWith(q) || rom.startsWith(q)) s = 800;
+    else if (eng.includes(q) || rom.includes(q)) s = 600;
+    else if (all.includes(q)) s = 500;
+    else {
+      const words = q.split(" ").filter(Boolean);
+      if (words.length >= 2 && words.every((w) => all.includes(w))) s = 400;
+    }
+
+    if (s > 0 && (!best || s > best.score)) {
+      best = { score: s, item };
+      if (s === 1000) break; // can't beat exact match
+    }
+  }
+
+  return best?.item;
+}
+

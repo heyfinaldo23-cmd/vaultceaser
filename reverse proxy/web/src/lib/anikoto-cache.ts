@@ -8,7 +8,9 @@ import {
   parseEpisodeListJson,
   parseSearchJson,
   parseWatchPage,
+  parseFilterPage,
   type AkEpisodeData,
+  type AkFilterItem,
   type AkSearchResult,
   type AkWatchInfo,
 } from "./anikoto";
@@ -234,3 +236,82 @@ export async function getAnikotoEpCounts(
   setCachedEpCounts(malId, epData.subCount, epData.dubCount);
   return { sub: epData.subCount, dub: epData.dubCount };
 }
+
+// ─── genre / sort / format / status maps ─────────────────────────────────────
+
+const AK_GENRES: Record<string, number> = {
+  "Action": 1, "Adventure": 2, "Cars": 538, "Comedy": 8, "Dementia": 453,
+  "Demons": 119, "Drama": 62, "Ecchi": 214, "Fantasy": 3, "Game": 180,
+  "Harem": 215, "Historical": 70, "Horror": 222, "Isekai": 74, "Josei": 404,
+  "Kids": 46, "Magic": 203, "Mahou Shoujo": 2310, "Martial Arts": 114,
+  "Mecha": 123, "Military": 125, "Music": 242, "Mystery": 57, "Parody": 162,
+  "Police": 136, "Psychological": 73, "Romance": 28, "Samurai": 163,
+  "School": 14, "Sci-Fi": 12, "Seinen": 50, "Shoujo": 252, "Shoujo Ai": 235,
+  "Shounen": 15, "Shounen Ai": 233, "Slice of Life": 35, "Space": 124,
+  "Sports": 29, "Super Power": 16, "Supernatural": 9, "Thriller": 54,
+  "Vampire": 58,
+};
+
+const AK_SORT: Record<string, string> = {
+  "POPULARITY_DESC": "most-viewed",
+  "TRENDING_DESC": "most-viewed",
+  "SCORE_DESC": "score",
+  "UPDATED_AT_DESC": "latest-updated",
+  "START_DATE_DESC": "release-date",
+};
+
+const AK_FORMAT: Record<string, string> = {
+  "TV": "TV", "MOVIE": "Movie", "OVA": "OVA", "ONA": "ONA",
+  "SPECIAL": "Special", "MUSIC": "Music",
+};
+
+const AK_STATUS: Record<string, string> = {
+  "RELEASING": "currently-airing",
+  "FINISHED": "finished-airing",
+  "NOT_YET_RELEASED": "not-yet-aired",
+};
+
+// ─── Anikoto /filter page fetcher ────────────────────────────────────────────
+
+export async function akFetchFilter(params: {
+  keyword?: string;
+  genre?: string;
+  format?: string;
+  status?: string;
+  sort?: string;
+  season?: string;
+  year?: string;
+  page?: number;
+}): Promise<AkFilterItem[]> {
+  const p = new URLSearchParams();
+
+  if (params.keyword) p.set("keyword", params.keyword);
+
+  if (params.genre) {
+    for (const g of params.genre.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const id = AK_GENRES[g];
+      if (id) p.append("genre[]", String(id));
+    }
+  }
+
+  if (params.format) {
+    const akFmt = AK_FORMAT[params.format.toUpperCase()];
+    if (akFmt) p.append("term_type[]", akFmt);
+  }
+
+  if (params.status) {
+    const akStat = AK_STATUS[params.status.toUpperCase()];
+    if (akStat) p.append("status[]", akStat);
+  }
+
+  if (params.season) p.append("season[]", params.season.toLowerCase());
+  if (params.year) p.append("year[]", params.year);
+
+  p.set("sort", AK_SORT[params.sort ?? ""] ?? "most-viewed");
+  if (params.page && params.page > 1) p.set("page", String(params.page));
+
+  const html = await proxyFetch(`/filter?${p.toString()}`);
+  if (!html) return [];
+  return parseFilterPage(html);
+}
+

@@ -51,21 +51,20 @@ export default function AnimeOverviewPage() {
     setSeasons([]);
     setRecs([]);
 
-    // If we have cached Anikoto counts, show them immediately before the main load
+    // Show cached Anikoto counts immediately
     const preCached = getCachedEpCounts(id);
     if (preCached && (preCached.sub > 0 || preCached.dub > 0)) {
       setEpCounts(preCached);
     }
 
-    // If we already have the Anikoto ID cached, fetch ep list in parallel with main load
+    // If Anikoto ID is cached, fetch ep list in parallel with main load
     const cachedSlug = getCachedSlug(id);
     const akParallelPromise = cachedSlug
       ? akFetchEpisodeList(cachedSlug.anikotoId).catch(() => null)
       : Promise.resolve(null);
 
-    const [detailRes, epRes, recRes, akParallelRes] = await Promise.allSettled([
+    const [detailRes, recRes, akParallelRes] = await Promise.allSettled([
       api.getAnime(id),
-      api.getEpisodes(id),
       api.getRecommendations(id, 1, 12),
       akParallelPromise,
     ]);
@@ -87,29 +86,20 @@ export default function AnimeOverviewPage() {
       }
       setAnime(info);
 
-      let subN = 0;
-      let dubN = 0;
-      if (epRes.status === "fulfilled") {
-        const epData = epRes.value;
-        const megaplay = epData.providers?.megaplay || {};
-        const eps = megaplay.episodes || {};
-        subN = (eps.sub?.length || 0) || epData.released?.sub || 0;
-        dubN = (eps.dub?.length || 0) || epData.released?.dub || 0;
-      } else {
-        const counts = await fetchEpisodeCounts([id]);
-        subN = counts[id]?.sub ?? 0;
-        dubN = counts[id]?.dub ?? 0;
-      }
+      let subN = preCached?.sub ?? 0;
+      let dubN = preCached?.dub ?? 0;
 
-      // Merge with parallel Anikoto result (available when anikotoId was cached)
+      // Apply parallel Anikoto result (available when anikotoId was cached)
       if (akParallelRes.status === "fulfilled" && akParallelRes.value) {
         const ak = akParallelRes.value;
         subN = Math.max(subN, ak.subCount);
         dubN = Math.max(dubN, ak.dubCount);
       }
 
-      setEpCounts({ sub: subN, dub: dubN });
-      if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
+      if (subN > 0 || dubN > 0) {
+        setEpCounts({ sub: subN, dub: dubN });
+        rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
+      }
 
       // First visit (no cached slug): resolve in background
       if (!cachedSlug) {

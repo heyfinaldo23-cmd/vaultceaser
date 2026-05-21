@@ -7,17 +7,56 @@ import { Button } from "@/components/ui/button";
 import AnimeCard, { AnimeCardSkeleton } from "@/components/AnimeCard";
 import BrowseFilterBar from "@/components/BrowseFilterBar";
 import { type AnimeMedia, type GenreData, api } from "@/lib/api";
-import { anilist } from "@/lib/anilist";
 import { filterAnimeList } from "@/lib/anime-filters";
-import { useEpisodeCountsMap } from "@/hooks/useEpisodeCounts";
+import { akFetchFilter } from "@/lib/anikoto-cache";
+import type { AkFilterItem } from "@/lib/anikoto";
+
+type AkResult = AnimeMedia & { akSub: number; akDub: number };
+
+async function resolveAkItems(items: AkFilterItem[]): Promise<AkResult[]> {
+  if (!items.length) return [];
+
+  // Batch resolve titles → MAL IDs via server-side static catalog
+  const titles = items.flatMap((i) => [i.title, i.native].filter(Boolean));
+  const unique = [...new Set(titles)];
+  let titleMap: Record<string, number> = {};
+  try {
+    const qs = `titles=${encodeURIComponent(unique.join("|"))}`;
+    const res = await fetch(`/api/resolve-titles?${qs}`, { cache: "no-store" });
+    if (res.ok) titleMap = (await res.json()) as Record<string, number>;
+  } catch {
+    // silently continue — some items just won't have MAL IDs
+  }
+
+  const seen = new Set<number>();
+  const out: AkResult[] = [];
+
+  for (const item of items) {
+    const malId = titleMap[item.title] ?? titleMap[item.native] ?? 0;
+    if (!malId || seen.has(malId)) continue;
+    seen.add(malId);
+
+    out.push({
+      id: malId,
+      title: { romaji: item.title, english: item.title, native: item.native },
+      coverImage: { large: item.poster, extraLarge: item.poster },
+      format: item.type.toUpperCase() as AnimeMedia["format"],
+      genres: item.genres,
+      averageScore: item.score ? Math.round(item.score * 10) : undefined,
+      isAdult: false,
+      akSub: item.subCount,
+      akDub: item.dubCount,
+    });
+  }
+
+  return out;
+}
 
 function BrowseContent() {
   const searchParams = useSearchParams();
 
   const [loading, setLoading] = useState(true);
-  const [results, setResults] = useState<AnimeMedia[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
+  const [results, setResults] = useState<AkResult[]>([]);
   const [genres, setGenres] = useState<GenreData | null>(null);
   const [openGenre, setOpenGenre] = useState(false);
 
@@ -28,32 +67,33 @@ function BrowseContent() {
   const selectedSeason = searchParams.get("season") || "";
   const selectedYear = searchParams.get("year") || "";
   const [sort, setSort] = useState(searchParams.get("sort") || "POPULARITY_DESC");
+  const [page, setPage] = useState(1);
+  const [hasNextPage, setHasNextPage] = useState(false);
 
   const perPage = 24;
-  const resultIds = results.map((a) => a.id);
-  const epCounts = useEpisodeCountsMap(resultIds);
 
   const fetchResults = useCallback(async (p: number) => {
     setLoading(true);
     try {
-      const hasQuery = Boolean(query.trim());
-      const yearNum = selectedYear ? parseInt(selectedYear) : undefined;
-
-      const data = await anilist.search({
-        q: hasQuery ? query.trim() : undefined,
-        page: p,
-        perPage,
+      const items = await akFetchFilter({
+        keyword: query.trim() || undefined,
         genre: selectedGenre || undefined,
         format: selectedFormat || undefined,
         status: selectedStatus || undefined,
         season: selectedSeason || undefined,
-        year: yearNum,
+        year: selectedYear || undefined,
         sort,
+        page: p,
       });
-      setResults(filterAnimeList(data.results || []));
-      setTotal(data.total || 0);
+
+      const resolved = await resolveAkItems(items);
+      const filtered = filterAnimeList(resolved);
+      setResults(filtered);
+      // Anikoto returns ~28 per page; show next button when full page comes back
+      setHasNextPage(items.length >= 24);
     } catch (e) {
       console.error("Browse search failed:", e);
+      setResults([]);
     } finally {
       setLoading(false);
     }
@@ -81,8 +121,6 @@ function BrowseContent() {
     setSelectedGenre(gs.join(","));
   };
 
-  const totalPages = Math.ceil(total / perPage);
-
   return (
     <div className="min-h-screen bg-[#0d0f14]">
       <div className="mx-auto max-w-[1440px] px-3 py-5 sm:px-4 sm:py-6">
@@ -91,7 +129,7 @@ function BrowseContent() {
             Browser
           </h1>
           <span className="shrink-0 text-xs text-[#9ca3af] sm:text-sm">
-            {total.toLocaleString()} anime
+            {results.length} anime
           </span>
         </div>
 
@@ -122,8 +160,8 @@ function BrowseContent() {
                 key={`${anime.id}-${i}`}
                 anime={anime}
                 size="medium"
-                subCount={epCounts[anime.id]?.sub}
-                dubCount={epCounts[anime.id]?.dub}
+                subCount={anime.akSub}
+                dubCount={anime.akDub}
               />
             ) : (
               <AnimeCardSkeleton key={i} />
@@ -135,7 +173,7 @@ function BrowseContent() {
           <p className="py-16 text-center text-[#9ca3af]">No anime found. Try different filters.</p>
         )}
 
-        {totalPages > 1 && (
+        {(page > 1 || hasNextPage) && (
           <div className="mt-8 flex items-center justify-center gap-2 pb-8">
             <Button
               variant="outline"
@@ -147,13 +185,13 @@ function BrowseContent() {
               <ChevronLeft className="h-4 w-4" />
             </Button>
             <span className="px-3 font-mono text-sm text-[#9ca3af]">
-              {page} / {totalPages}
+              {page}
             </span>
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setPage(Math.min(totalPages, page + 1))}
-              disabled={page >= totalPages}
+              onClick={() => setPage(page + 1)}
+              disabled={!hasNextPage}
               className="border-[#2a2d3a] bg-[#1a1d28]"
             >
               <ChevronRight className="h-4 w-4" />

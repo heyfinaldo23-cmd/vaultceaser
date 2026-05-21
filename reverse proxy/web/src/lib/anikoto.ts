@@ -43,6 +43,20 @@ export interface AkWatchInfo {
   hasSub: boolean;
 }
 
+export interface AkFilterItem {
+  title: string;
+  native: string;
+  slug: string;
+  anikotoId: number;
+  poster: string;
+  subCount: number;
+  dubCount: number;
+  totalCount: number | null;
+  type: string;
+  score: number;
+  genres: string[];
+}
+
 export interface AkHomeItem {
   title: string;
   native: string;
@@ -300,3 +314,49 @@ export function parseHomeHtml(html: string): {
 export function akScoreTo100(score: number): number {
   return Math.round(score * 10);
 }
+
+// ─── filter page ─────────────────────────────────────────────────────────────
+
+/**
+ * Parses the #list-items section of Anikoto's /filter page.
+ * Each item has sub/dub episode counts in .ep-status.sub/.ep-status.dub spans.
+ */
+export function parseFilterPage(html: string): AkFilterItem[] {
+  const doc = parseDoc(html);
+  const container = doc.querySelector("#list-items");
+  if (!container) return [];
+
+  return Array.from(container.querySelectorAll(".item"))
+    .map((item) => {
+      const posterEl = item.querySelector("[data-tip]") as HTMLElement | null;
+      const anikotoId = parseInt(posterEl?.dataset.tip ?? "0", 10) || 0;
+
+      const watchLink = item.querySelector("a[href*='/watch/']");
+      const href = watchLink?.getAttribute("href") ?? "";
+      const slug = slugFromUrl(href);
+
+      const poster = item.querySelector("img")?.getAttribute("src") ?? "";
+
+      const nameEl = item.querySelector("a.name.d-title, .name.d-title") as HTMLElement | null;
+      const title = textOf(nameEl);
+      const native = nameEl?.dataset.jp ?? "";
+
+      const subCount = parseInt(textOf(item.querySelector(".ep-status.sub span")), 10) || 0;
+      const dubCount = parseInt(textOf(item.querySelector(".ep-status.dub span")), 10) || 0;
+      const totalText = textOf(item.querySelector(".ep-status.total span"));
+      const totalCount = totalText ? parseInt(totalText, 10) || null : null;
+
+      const type = textOf(item.querySelector(".meta .inner .right, .meta .right"));
+
+      const scoreText = textOf(item.querySelector(".m-item.rated span"));
+      const score = parseFloat(scoreText) || 0;
+
+      const genres = Array.from(item.querySelectorAll("a[href*='/genre/']"))
+        .map((a) => textOf(a).trim())
+        .filter(Boolean);
+
+      return { title, native, slug, anikotoId, poster, subCount, dubCount, totalCount, type, score, genres };
+    })
+    .filter((item) => Boolean(item.title && item.slug));
+}
+
