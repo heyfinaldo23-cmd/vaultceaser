@@ -7,6 +7,7 @@
     "build": "next build --webpack",
     "start": "next start -p 3456 -H 0.0.0.0",
     "lint": "eslint",
+    "catalog:build": "node scripts/build-static-catalog.mjs",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push"
   },

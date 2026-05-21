@@ -1583,7 +1583,7 @@ async def _mal_to_anikoto_id(mal_id: int) -> Optional[int]:
                 matches.append((score, int(id_m.group(1))))
             if matches:
                 matches.sort(key=lambda x: x[0], reverse=True)
-                return matches[0][1] if matches[0][0] >= 100 else None
+                return matches[0][1] if matches[0][0] >= 80 else None
             return None
 
         async def ajax_search_slug(title: str) -> Optional[str]:
@@ -1609,7 +1609,7 @@ async def _mal_to_anikoto_id(mal_id: int) -> Optional[int]:
                 anchors.append((score, slug))
             if anchors:
                 anchors.sort(key=lambda x: x[0], reverse=True)
-                return anchors[0][1] if anchors[0][0] >= 100 else None
+                return anchors[0][1] if anchors[0][0] >= 80 else None
             return None
 
         for title in titles:
