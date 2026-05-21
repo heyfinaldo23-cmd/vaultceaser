@@ -26,7 +26,7 @@ import { clientApi } from "@/lib/client-api";
 import { useAuth } from "@/components/AuthProvider";
 import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
 import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
-import { getAnikotoEpCounts } from "@/lib/anikoto-cache";
+import { getAnikotoEpCounts, getCachedEpCounts, getCachedSlug, akFetchEpisodeList } from "@/lib/anikoto-cache";
 import { filterExternalLinks, isBlockedExternalLink } from "@/lib/external-links";
 
 type EpCounts = { sub: number; dub: number };
@@ -51,10 +51,23 @@ export default function AnimeOverviewPage() {
     setSeasons([]);
     setRecs([]);
 
-    const [detailRes, epRes, recRes] = await Promise.allSettled([
+    // If we have cached Anikoto counts, show them immediately before the main load
+    const preCached = getCachedEpCounts(id);
+    if (preCached && (preCached.sub > 0 || preCached.dub > 0)) {
+      setEpCounts(preCached);
+    }
+
+    // If we already have the Anikoto ID cached, fetch ep list in parallel with main load
+    const cachedSlug = getCachedSlug(id);
+    const akParallelPromise = cachedSlug
+      ? akFetchEpisodeList(cachedSlug.anikotoId).catch(() => null)
+      : Promise.resolve(null);
+
+    const [detailRes, epRes, recRes, akParallelRes] = await Promise.allSettled([
       api.getAnime(id),
       api.getEpisodes(id),
       api.getRecommendations(id, 1, 12),
+      akParallelPromise,
     ]);
 
     if (detailRes.status === "rejected") {
@@ -87,29 +100,29 @@ export default function AnimeOverviewPage() {
         subN = counts[id]?.sub ?? 0;
         dubN = counts[id]?.dub ?? 0;
       }
+
+      // Merge with parallel Anikoto result (available when anikotoId was cached)
+      if (akParallelRes.status === "fulfilled" && akParallelRes.value) {
+        const ak = akParallelRes.value;
+        subN = Math.max(subN, ak.subCount);
+        dubN = Math.max(dubN, ak.dubCount);
+      }
+
       setEpCounts({ sub: subN, dub: dubN });
       if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
 
-      // Background: get dub count from Anikoto (backend often reports 0 dub even when it works)
-      const titleStr = animeTitle(info);
-      getAnikotoEpCounts(id, titleStr).then((akCounts) => {
-        if (!akCounts) return;
-        setEpCounts((prev) => {
-          const s = Math.max(prev.sub, akCounts.sub);
-          const d = Math.max(prev.dub, akCounts.dub);
-          if (s === prev.sub && d === prev.dub) return prev;
-          rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
-          return { sub: s, dub: d };
-        });
-      }).catch(() => {});
-
-      // If episodes call failed, try batch counts endpoint for fresher data
-      if (epRes.status === "rejected" && subN === 0 && dubN === 0) {
-        fetchEpisodeCounts([id]).then((counts) => {
-          const c = counts[id];
-          if (!c) return;
-          setEpCounts({ sub: Math.max(subN, c.sub), dub: Math.max(dubN, c.dub) });
-          if (c.sub > 0 || c.dub > 0) rememberEpisodeCounts({ [id]: { sub: c.sub, dub: c.dub } });
+      // First visit (no cached slug): resolve in background
+      if (!cachedSlug) {
+        const titleStr = animeTitle(info);
+        getAnikotoEpCounts(id, titleStr).then((akCounts) => {
+          if (!akCounts) return;
+          setEpCounts((prev) => {
+            const s = Math.max(prev.sub, akCounts.sub);
+            const d = Math.max(prev.dub, akCounts.dub);
+            if (s === prev.sub && d === prev.dub) return prev;
+            rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
+            return { sub: s, dub: d };
+          });
         }).catch(() => {});
       }
 

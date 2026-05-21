@@ -19,7 +19,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { loadPlayerPrefs, savePlayerPrefs, type PlayerPrefs } from "@/lib/player-prefs";
 import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
 import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
-import { getAnikotoEpCounts } from "@/lib/anikoto-cache";
+import { getAnikotoEpCounts, getCachedEpCounts, getCachedSlug, akFetchEpisodeList } from "@/lib/anikoto-cache";
 import {
   getLatestLocalWatchForAnime,
   getLocalWatchProgress,
@@ -200,10 +200,23 @@ function WatchPageInner() {
     setSeasons([]);
     setRecs([]);
 
-    const [detailRes, epRes, recRes] = await Promise.allSettled([
+    // Show cached Anikoto counts immediately (before async load completes)
+    const preCached = getCachedEpCounts(id);
+    if (preCached && (preCached.sub > 0 || preCached.dub > 0)) {
+      setEpCounts(preCached);
+    }
+
+    // If anikotoId is cached, fetch episode list in parallel with main load
+    const cachedSlug = getCachedSlug(id);
+    const akParallelPromise = cachedSlug
+      ? akFetchEpisodeList(cachedSlug.anikotoId).catch(() => null)
+      : Promise.resolve(null);
+
+    const [detailRes, epRes, recRes, akParallelRes] = await Promise.allSettled([
       api.getAnime(id),
       api.getEpisodes(id),
       api.getRecommendations(id, 1, 12),
+      akParallelPromise,
     ]);
 
     if (detailRes.status === "rejected") {
@@ -243,34 +256,52 @@ function WatchPageInner() {
 
       // Dub playlist: use real dub episodes from provider, do NOT fall back to sub list
       // (showing sub episodes as dub would be wrong — we just show count from released)
-      const subN = Math.max(subList.length, releasedSub);
-      const dubN = Math.max(dubList.length, releasedDub);
+      let subN = Math.max(subList.length, releasedSub);
+      let dubN = Math.max(dubList.length, releasedDub);
 
       setMegaplayEps({ sub: subList, dub: dubList.length ? dubList : subList });
-      setEpCounts({ sub: subN, dub: dubN });
-      if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
 
-      // Background: get better dub count from Anikoto; also build synthetic dub list if missing
-      const titleStr = animeTitle(info);
-      getAnikotoEpCounts(id, titleStr).then((akCounts) => {
-        if (!akCounts) return;
-        setEpCounts((prev) => {
-          const s = Math.max(prev.sub, akCounts.sub);
-          const d = Math.max(prev.dub, akCounts.dub);
-          if (s === prev.sub && d === prev.dub) return prev;
-          rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
-          return { sub: s, dub: d };
-        });
-        // If backend had no dub list but Anikoto says there are dub episodes, generate synthetic
-        if (akCounts.dub > 0 && dubList.length === 0) {
-          const synthDub: EpisodeData[] = Array.from({ length: akCounts.dub }, (_, i) => ({
+      // Merge with parallel Anikoto result if available (cached anikotoId path)
+      if (akParallelRes.status === "fulfilled" && akParallelRes.value) {
+        const ak = akParallelRes.value;
+        subN = Math.max(subN, ak.subCount);
+        dubN = Math.max(dubN, ak.dubCount);
+        // Build synthetic dub list if backend had none
+        if (ak.dubCount > 0 && !dubList.length) {
+          const synthDub: EpisodeData[] = Array.from({ length: ak.dubCount }, (_, i) => ({
             id: `mal:${id}:${i + 1}`,
             number: i + 1,
             title: `Episode ${i + 1}`,
           }));
-          setMegaplayEps((prev) => prev ? { ...prev, dub: synthDub } : prev);
+          setMegaplayEps({ sub: subList, dub: synthDub });
         }
-      }).catch(() => {});
+      }
+
+      setEpCounts({ sub: subN, dub: dubN });
+      if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
+
+      // First visit (no cached slug): resolve in background
+      if (!cachedSlug) {
+        const titleStr = animeTitle(info);
+        getAnikotoEpCounts(id, titleStr).then((akCounts) => {
+          if (!akCounts) return;
+          setEpCounts((prev) => {
+            const s = Math.max(prev.sub, akCounts.sub);
+            const d = Math.max(prev.dub, akCounts.dub);
+            if (s === prev.sub && d === prev.dub) return prev;
+            rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
+            return { sub: s, dub: d };
+          });
+          if (akCounts.dub > 0 && dubList.length === 0) {
+            const synthDub: EpisodeData[] = Array.from({ length: akCounts.dub }, (_, i) => ({
+              id: `mal:${id}:${i + 1}`,
+              number: i + 1,
+              title: `Episode ${i + 1}`,
+            }));
+            setMegaplayEps((prev) => prev ? { ...prev, dub: synthDub } : prev);
+          }
+        }).catch(() => {});
+      }
 
       const cat = searchParams.get("cat") === "dub" ? "dub" : "sub";
       const playList = cat === "dub" ? (dubList.length ? dubList : subList) : subList;
