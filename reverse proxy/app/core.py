@@ -2002,10 +2002,16 @@ def _schedule_episode_counts_refresh(mal_id: int) -> None:
 
 async def batch_episode_counts(
     ids: str = Query(..., description="Comma-separated MAL IDs (max 50)"),
-    refresh: bool = Query(False, description="Schedule a background refresh"),
+    refresh: bool = Query(False, description="Compatibility no-op; use warm=true to refresh cache"),
+    warm: bool = Query(False, description="Schedule a background provider refresh"),
     blocking: bool = Query(False, description="Wait for live provider refresh; never use from browser grids"),
 ):
-    """Released sub/dub counts for browse/home cards, cached for 5 minutes."""
+    """Released sub/dub counts for browse/home cards.
+
+    Normal calls are cache-only and never touch upstream providers. This keeps
+    homepage traffic from stampeding Jikan/Anikoto. Use warm=true from an admin
+    job if you want background refreshes.
+    """
     id_list: List[int] = [int(p) for p in ids.split(",") if p.strip().isdigit()][:50]
     if not id_list:
         return {"counts": {}}
@@ -2016,14 +2022,15 @@ async def batch_episode_counts(
         now = time.monotonic()
         cached = _EP_COUNTS_CACHE.get(mid)
         if cached and not blocking:
-            if (now - cached[0]) >= _EP_COUNTS_CACHE_TTL:
+            if warm and (now - cached[0]) >= _EP_COUNTS_CACHE_TTL:
                 _schedule_episode_counts_refresh(mid)
             return mid, cached[1]
 
-        # Homepage/browse calls must be cheap. Even refresh=true only schedules
-        # warming; blocking=true is reserved for manual diagnostics.
+        # Homepage/browse calls must be cheap. Missing cache returns unknown
+        # immediately; provider warming is explicit to avoid upstream 429s.
         if not blocking:
-            _schedule_episode_counts_refresh(mid)
+            if warm:
+                _schedule_episode_counts_refresh(mid)
             return mid, {"sub": 0, "dub": 0}
 
         async with sem:
@@ -2759,8 +2766,10 @@ async def megaplay_reverse_proxy(path: str, request: Request):
                 sep = "&" if "?" in stream_url else "?"
                 stream_url = f"{stream_url}{sep}{request.url.query}"
             return RedirectResponse(stream_url, status_code=302)
-        raise HTTPException(status_code=404,
-                            detail=f"Stream not found for MAL {mal_id_r} ep {ep_num_r}")
+        direct_url = f"{MEGAPLAY_BASE}/stream/mal/{mal_id_r}/{ep_num_r}/{cat_r}"
+        if request.url.query:
+            direct_url = f"{direct_url}?{request.url.query}"
+        return RedirectResponse(direct_url, status_code=302)
 
     m_s2 = re.match(r"^stream/s-2/(.+)/([^/]+)$", path)
     if m_s2:

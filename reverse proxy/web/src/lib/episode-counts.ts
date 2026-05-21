@@ -74,7 +74,9 @@ export async function fetchEpisodeCounts(
 
   const toFetch = options.refresh ? unique : stale;
   try {
-    const data = await api.getEpisodeCounts(toFetch, options.refresh);
+    // Browser grids must never trigger provider refreshes; backend warming is
+    // handled by explicit server/admin jobs.
+    const data = await api.getEpisodeCounts(toFetch, false);
     const fresh: EpisodeCountsMap = {};
     for (const [key, val] of Object.entries(data.counts || {})) {
       const id = Number(key);

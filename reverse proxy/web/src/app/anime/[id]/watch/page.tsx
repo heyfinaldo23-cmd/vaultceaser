@@ -66,6 +66,7 @@ function WatchPageInner() {
   const prefsRef = useRef<PlayerPrefs>(prefs);
   const userRef = useRef(user);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const playerShellRef = useRef<HTMLDivElement>(null);
   const lastPlayerTimeRef = useRef(0);
   const lastPlayerRawTimeRef = useRef(0);
   const lastTickAtRef = useRef(0);
@@ -364,22 +365,64 @@ function WatchPageInner() {
   const goNextRef = useRef(goNext);
   useEffect(() => { goNextRef.current = goNext; }, [goNext]);
 
+  const toggleExpandedPlayer = useCallback(() => {
+    if (expanded) {
+      setExpanded(false);
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+      return;
+    }
+    setExpanded(true);
+    const el = playerShellRef.current;
+    if (el?.requestFullscreen) void el.requestFullscreen().catch(() => {});
+  }, [expanded]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) setExpanded(false);
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
   useEffect(() => {
     if (!currentEp || !iframeSrc) return;
     const onMessage = (event: MessageEvent) => {
       if (iframeRef.current?.contentWindow && event.source !== iframeRef.current.contentWindow) return;
-      const data = event.data as { type?: string; currentTime?: number; duration?: number; message?: string } | undefined;
-      if (!data?.type || !String(data.type).startsWith("vaultceaser:")) return;
-      if (data.type === "vaultceaser:player-error") { setPlayerError(data.message || "Could not load player"); return; }
-      if (["vaultceaser:player-ready","vaultceaser:player-resumed","vaultceaser:timeupdate","vaultceaser:player-skipped"].includes(data.type)) {
+      let data = event.data as {
+        type?: string;
+        event?: string;
+        channel?: string;
+        currentTime?: number;
+        time?: number;
+        duration?: number;
+        message?: string;
+      } | string | undefined;
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); } catch { return; }
+      }
+      if (!data || typeof data !== "object") return;
+
+      const type = String(data.type || "");
+      const eventName = String(data.event || "");
+      const isVaultEvent = type.startsWith("vaultceaser:");
+      const isMegaPlayProgress = eventName === "time" || type === "watching-log";
+      const isMegaPlayComplete = eventName === "complete";
+      const isMegaPlayError = eventName === "error";
+
+      if (isMegaPlayError || type === "vaultceaser:player-error") {
+        setPlayerError(data.message || "Could not load player");
+        return;
+      }
+
+      if (isMegaPlayProgress || ["vaultceaser:player-ready","vaultceaser:player-resumed","vaultceaser:timeupdate","vaultceaser:player-skipped"].includes(type)) {
         playerCanReportRef.current = true;
         clearAutoNextTimers();
-        const rawPosition = Math.max(0, Number(data.currentTime ?? 0) || 0);
+        const rawPosition = Math.max(0, Number(data.currentTime ?? data.time ?? 0) || 0);
         const position = Math.floor(rawPosition);
         const duration = data.duration && Number.isFinite(data.duration) && data.duration > 0 ? Math.floor(data.duration) : null;
         const now = Date.now();
         let nextWatchedSeconds = watchedSecondsRef.current;
-        if (data.type === "vaultceaser:timeupdate" && lastTickAtRef.current && rawPosition > lastPlayerRawTimeRef.current) {
+        if ((isMegaPlayProgress || type === "vaultceaser:timeupdate") && lastTickAtRef.current && rawPosition > lastPlayerRawTimeRef.current) {
           const deltaWall = Math.max(0, Math.min(5, (now - lastTickAtRef.current) / 1000));
           const deltaVideo = Math.max(0, Math.min(5, rawPosition - lastPlayerRawTimeRef.current));
           watchedRemainderRef.current += Math.min(deltaWall || deltaVideo, deltaVideo || deltaWall);
@@ -394,7 +437,7 @@ function WatchPageInner() {
         syncQualifiedProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: nextWatchedSeconds });
         return;
       }
-      if (data.type === "vaultceaser:episode-ended") {
+      if (isMegaPlayComplete || type === "vaultceaser:episode-ended") {
         const duration = playerDurationSecondsRef.current;
         const position = duration && duration > 0 ? Math.max(0, duration - 1) : lastPlayerTimeRef.current;
         persistProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: Math.max(watchedSecondsRef.current, 60), force: true });
@@ -511,20 +554,20 @@ function WatchPageInner() {
               </button>
             ))}
           </div>
-          <PlayerToolbar prefs={prefs} onToggle={togglePref} expanded={expanded} onExpand={() => setExpanded((v) => !v)} onPrev={goPrev} onNext={goNext} hasPrev={hasPrev} hasNext={hasNext} />
+          <PlayerToolbar prefs={prefs} onToggle={togglePref} expanded={expanded} onExpand={toggleExpandedPlayer} onPrev={goPrev} onNext={goNext} hasPrev={hasPrev} hasNext={hasNext} />
         </div>
       </section>
 
       <div className="mx-auto max-w-6xl px-3 sm:px-4">
         <section className={cn("relative mt-6", expanded && "z-[60]")}>
           {expanded && <div className="fixed inset-0 z-50 bg-black/88" onClick={() => setExpanded(false)} role="presentation" />}
-          <div className={cn(dimChrome && "relative z-30", expanded && "fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-1rem)] max-w-5xl -translate-x-1/2 -translate-y-1/2 sm:w-[calc(100vw-2rem)] md:w-[calc(100vw-5rem)]")} onClick={(e) => expanded && e.stopPropagation()}>
+          <div ref={playerShellRef} className={cn(dimChrome && "relative z-30", expanded && "fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-1rem)] max-w-5xl -translate-x-1/2 -translate-y-1/2 sm:w-[calc(100vw-2rem)] md:w-[calc(100vw-5rem)]")} onClick={(e) => expanded && e.stopPropagation()}>
             {expanded && <button type="button" onClick={() => setExpanded(false)} className="absolute -top-10 right-0 flex items-center gap-1 font-mono text-xs text-white/70 hover:text-white"><X className="h-4 w-4" />Shrink</button>}
             <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-[var(--border)] bg-black shadow-lg shadow-black/40 sm:rounded-xl">
               {iframeSrc ? (
                 <iframe ref={iframeRef} src={iframeSrc} title="Player" className="h-full w-full border-0"
                   allow="fullscreen; encrypted-media; picture-in-picture" allowFullScreen
-                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" />
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation" />
               ) : (
                 <div className="flex aspect-video items-center justify-center text-sm text-[var(--muted)]">{playerError || "Select an episode"}</div>
               )}
