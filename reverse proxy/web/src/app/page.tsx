@@ -1,31 +1,31 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import Link from "next/link";
-import AnimeCard, { AnimeCardSkeleton } from "@/components/AnimeCard";
+import { AnimeCardSkeleton } from "@/components/AnimeCard";
 import EpisodeCountBadges from "@/components/EpisodeCountBadges";
-import { api, type AnimeMedia } from "@/lib/api";
-import { filterAnimeList } from "@/lib/anime-filters";
-import { clientApi } from "@/lib/client-api";
 import { useAuth } from "@/components/AuthProvider";
-import { useEpisodeCountsMap } from "@/hooks/useEpisodeCounts";
 import {
   listQualifiedLocalWatchProgress,
   type LocalWatchProgress,
 } from "@/lib/watch-progress";
-import { akFetchHome, setCachedEpCounts, type AkHomeFeed } from "@/lib/anikoto-cache";
-import type { AkHomeItem } from "@/lib/anikoto";
+import {
+  akFetchHome,
+  akFetchLatestUpdated,
+  akFetchNewRelease,
+  type AkHomeFeed,
+} from "@/lib/anikoto-cache";
+import type { AkHomeItem, AkFilterItem } from "@/lib/anikoto";
 
-// ─── nekos.best loading gif ───────────────────────────────────────────────────
+// ─── nekos.best loading banner ────────────────────────────────────────────────
 
-const NEKOS_CATEGORIES = ["nod", "wave", "think", "happy", "smile", "bored", "lurk"];
+const NEKOS_CATS = ["nod", "wave", "think", "happy", "smile", "bored"];
 
-function NekosLoadingBanner({ visible }: { visible: boolean }) {
+function NekosLoadingBanner() {
   const [gifUrl, setGifUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!visible) return;
-    const cat = NEKOS_CATEGORIES[Math.floor(Math.random() * NEKOS_CATEGORIES.length)];
+    const cat = NEKOS_CATS[Math.floor(Math.random() * NEKOS_CATS.length)];
     fetch(`https://nekos.best/api/v2/${cat}?amount=1`)
       .then((r) => r.json())
       .then((d) => {
@@ -33,30 +33,29 @@ function NekosLoadingBanner({ visible }: { visible: boolean }) {
         if (url) setGifUrl(url);
       })
       .catch(() => null);
-  }, [visible]);
-
-  if (!visible) return null;
+  }, []);
 
   return (
-    <div className="flex items-center justify-center gap-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-5">
+    <div className="flex items-center gap-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
       {gifUrl ? (
-        <img src={gifUrl} alt="loading..." className="h-20 w-20 rounded-lg object-cover" />
+        <img src={gifUrl} alt="loading" className="h-16 w-16 rounded-lg object-cover" />
       ) : (
-        <div className="h-20 w-20 rounded-lg skeleton" />
+        <div className="h-16 w-16 rounded-lg skeleton shrink-0" />
       )}
-      <div className="space-y-1">
-        <p className="font-mono text-sm font-semibold text-white">Fetching latest anime…</p>
+      <div>
+        <p className="font-mono text-sm font-bold text-white">Fetching latest anime…</p>
         <p className="font-mono text-xs text-[var(--muted)]">Grabbing fresh data from Anikoto</p>
       </div>
     </div>
   );
 }
 
-// ─── Anikoto latest episode card ─────────────────────────────────────────────
+// ─── card for Anikoto items ───────────────────────────────────────────────────
 
-function AkHomeCard({ item, malId }: { item: AkHomeItem; malId?: number }) {
-  const href = malId ? `/anime/${malId}` : `/browse?keyword=${encodeURIComponent(item.title)}`;
-  const epNum = item.href.match(/\/ep-(\d+)/)?.[1];
+function AkCard({ item, epNum }: { item: AkHomeItem | AkFilterItem; epNum?: string }) {
+  const slug = item.slug;
+  const href = slug ? `/anime/ak/${slug}` : "#";
+  const num = epNum ?? (item as AkHomeItem).href?.match(/\/ep-(\d+)/)?.[1];
 
   return (
     <Link href={href} className="group block w-[130px] shrink-0">
@@ -67,18 +66,20 @@ function AkHomeCard({ item, malId }: { item: AkHomeItem; malId?: number }) {
             alt={item.title}
             className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
             loading="lazy"
-            onError={(e) => { (e.target as HTMLImageElement).src = "/placeholder.svg"; }}
+            onError={(e) => {
+              (e.target as HTMLImageElement).src = "/placeholder.svg";
+            }}
           />
         ) : (
           <div className="h-full w-full bg-[#1a1d28]" />
         )}
-        {epNum && (
+        {num && (
           <span className="absolute right-1 top-1 rounded bg-[#e8621a] px-1 py-0.5 font-mono text-[8px] font-bold text-white">
-            EP {epNum}
+            EP {num}
           </span>
         )}
       </div>
-      <h3 className="mt-1 line-clamp-2 font-mono text-[11px] font-medium leading-tight text-white group-hover:text-[#e8621a]">
+      <h3 className="mt-1 line-clamp-2 font-mono text-[11px] font-bold leading-tight text-white group-hover:text-[#e8621a]">
         {item.title}
       </h3>
       <EpisodeCountBadges
@@ -93,63 +94,13 @@ function AkHomeCard({ item, malId }: { item: AkHomeItem; malId?: number }) {
   );
 }
 
-// ─── cute grill sidebar ───────────────────────────────────────────────────────
+// ─── cute grill widget ────────────────────────────────────────────────────────
 
 const CUTE_GIRLS = [
   "1363382418078.png","141000167429.png","1410001686910.png","1410306398205.png",
   "1416301704148.png","1422254058570.png","1422254999827.png","1424092566613.png",
-  "1428177826695.png","1428177904344.png","1428178080167.png","1428178155255.png",
-  "1428178187507.png","1428254016467.png","1428423289437.png","1428707759205.png",
-  "1429510703681.png","14350958102351.png","1435095810963.png","1435212506997.png",
-  "1436240851027.png","1444797684947.png","1444797896875.png","1444912076567.png",
-  "1444925656945.png","1444932063639.png","1445288849940.png","1445289056206.png",
-  "1445902711571.png","1446055508030.png","1446382234634.png","1446463082730.png",
-  "1446543984763.png","1446567791227.png","1446781681255.png","1447699627084.png",
-  "1448061734635.png","1448184200057.png","1448242472700.png","1448242666775.png",
-  "1448491901093.png","1448856052869.png","1449726465401.png","1450354879735.png",
-  "1450722871010.png","1450724583409.png","1450726187259.png","1453766877670.png",
-  "1456435736475.png","1456626037119.png","1456795820199.png","1457227943457.png",
-  "1457343592535.png","1457740113058.png","1457765150963.png","1457903809526.png",
-  "1458107401807.png","1458114655716.png","1458179149667.png","1458181302393.png",
-  "1458378445396.png","1458438424722.png","1458593213144.png","1458602218407.png",
-  "1458689827974.png","1458695854180.png","1458701216283.png","1458879883654.png",
-  "1459005360759.png","1459039594461.png","1466924283295.png","1468421480662.png",
-  "1471262460053.png","1471285748918.png","1472894659994.png","1480486527028.png",
-  "1484879057343.png","1486346829409.png","1489034771085.png","1489257402500.png",
-  "1489281927118.png","1489297097940.png","1490418851494.png","1492281060221.png",
-  "1494909700688.png","1506616576326.png","1512072270390.png","1512276789957.png",
-  "7ckzd1.png","e1c25e2f18430875d15fdcfbb14257e8.png","megumin_1.png","megumin_2.png",
-  "nz5vnb.png","patreon-1.png","patreon-2.png","patreon-3.png","patreon-4.png",
-  "patreon-5.png","e9b96c420ce18817342e49c48a6474c589e681ba.png",
-  "e5fb6b20a0c08e4c1e8b8240311b086649ee22e5.png",
-  "d4eab1c1e9ed18b875bf126ca2695a3f6eb19572.png",
-  "c2289fbdd0c68b41ab577b5aea13ce57244ae761.png",
-  "c7a2402a46d629ecbc4ede1013725579ed5bfad8.png",
-  "b938a56e8a244d36ad95d03747c885e113f85c2a.png",
-  "b3bbb9663ede2787c679ed87bb275989b87a92d7.png",
-  "ae317675248165f9eb0e5d1e8acb4133313c5338.png",
-  "ac0d60cadc20650dc2b1909d986d6c2c0b851957.png",
-  "a33ae892991a84c1b5bc21e0a94a2cd112983d8a.png",
-  "a5f8a60024d2e767c4f914c7959f3bf3af6c310e.png",
-  "05231e2b5d3b8a349e05a8faeeb811238c936a87.png",
-  "0708bf53626f99a3d48af309bd68726e6cf3069b.png",
-  "0405c517061c231de1b82ae64cdc705d84309bec.png",
-  "300c90359065eff5d5bd8b7f7960b97c6b038698.png",
-  "85bc49d77b4d6c6b8de30ba8dcb09fd8953c998f.png",
-  "73a31b9f354dcf44d613ad260ad3fb3b050c4e1b.png",
-  "041b992b2d1d471f4c9141ce6d7693feba846661.png",
-  "027f2e9193b1421b57f8c346864b5e76a4dcf06e.png",
-  "9f02075ced49095a4b0af001204b86b59a37fc64.png",
-  "9b2c84b3e011ab903073ce52c0b6ba0bdf620aea.png",
-  "8c3320676e921e900f0ff432afb3774179250c50.png",
-  "7fd5965f41dcc6d73b13a9338ff9d90f76f712fe.png",
-  "5db1e4e942be929fd139d895f6ada111941a0806.png",
-  "5c48162e4446d4c0597813804f8a8f65e60791b5.png",
-  "5a1998883c5f117fd913cbc2bfa9ea86d2f47e37.png",
-  "4babdfe8cc20226b619089b55e613eacdcadf77b.png",
-  "3d31d92b4fdfa126bca3aa0c3d9210350f3b8943.png",
-  "3c15b632c4d1cf2406585f335f69c201011e033b.png",
-  "2c003b12e53212fc13595e092d96b6282f86d456.png",
+  "megumin_1.png","megumin_2.png","nz5vnb.png","patreon-1.png","patreon-2.png",
+  "e9b96c420ce18817342e49c48a6474c589e681ba.png",
 ];
 const CATBOX_QTS_BASE = "https://catbox.moe/pictures/qts";
 
@@ -170,20 +121,17 @@ function CuteGrillWidget() {
     <img
       key={img}
       src={`${CATBOX_QTS_BASE}/${img}`}
-      alt="cute grill"
+      alt=""
       className="h-auto w-40 align-middle drop-shadow-[0_12px_24px_rgba(0,0,0,0.45)]"
       loading="lazy"
       referrerPolicy="no-referrer"
       style={{ opacity: visible ? 1 : 0, transition: "opacity 0.3s" }}
       onLoad={() => setVisible(true)}
       onError={() => {
-        if (attempts >= CUTE_GIRLS.length - 1) {
-          setErrored(true);
-          return;
-        }
+        if (attempts >= CUTE_GIRLS.length - 1) { setErrored(true); return; }
         setVisible(false);
-        setAttempts((next) => next + 1);
-        setIndex((current) => (current + 1) % CUTE_GIRLS.length);
+        setAttempts((n) => n + 1);
+        setIndex((c) => (c + 1) % CUTE_GIRLS.length);
       }}
     />
   );
@@ -191,22 +139,14 @@ function CuteGrillWidget() {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-function SectionHeader({
-  title,
-  href,
-  label = "Browse all",
-}: {
-  title: string;
-  href?: string;
-  label?: string;
-}) {
+function SectionHeader({ title, href, label = "Browse all" }: { title: string; href?: string; label?: string }) {
   return (
     <div className="mb-3 flex items-center justify-between">
-      <h2 className="font-mono text-xs font-semibold uppercase tracking-widest text-[var(--muted)]">
+      <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-[var(--muted)]">
         {title}
       </h2>
       {href && (
-        <Link href={href} className="font-mono text-xs text-[var(--accent)] hover:underline">
+        <Link href={href} className="font-mono text-xs font-bold text-[var(--accent)] hover:underline">
           {label}
         </Link>
       )}
@@ -232,14 +172,8 @@ function HScroll({ children }: { children: React.ReactNode }) {
         scrollLeft.current = ref.current?.scrollLeft ?? 0;
         if (ref.current) ref.current.style.cursor = "grabbing";
       }}
-      onMouseLeave={() => {
-        down.current = false;
-        if (ref.current) ref.current.style.cursor = "";
-      }}
-      onMouseUp={() => {
-        down.current = false;
-        if (ref.current) ref.current.style.cursor = "";
-      }}
+      onMouseLeave={() => { down.current = false; if (ref.current) ref.current.style.cursor = ""; }}
+      onMouseUp={() => { down.current = false; if (ref.current) ref.current.style.cursor = ""; }}
       onMouseMove={(e) => {
         if (!down.current || !ref.current) return;
         e.preventDefault();
@@ -250,11 +184,7 @@ function HScroll({ children }: { children: React.ReactNode }) {
       }}
       onDragStart={(e) => e.preventDefault()}
       onClick={(e) => {
-        if (hasDragged.current) {
-          e.preventDefault();
-          e.stopPropagation();
-          hasDragged.current = false;
-        }
+        if (hasDragged.current) { e.preventDefault(); e.stopPropagation(); hasDragged.current = false; }
       }}
       style={{ cursor: "grab" }}
     >
@@ -263,196 +193,32 @@ function HScroll({ children }: { children: React.ReactNode }) {
   );
 }
 
-function CardRow({
-  items,
-  loading,
-  count,
-  epCounts,
-}: {
-  items: AnimeMedia[];
-  loading: boolean;
-  count: number;
-  epCounts: Record<number, { sub: number; dub: number }>;
-}) {
+function SkeletonRow({ count }: { count: number }) {
   return (
     <HScroll>
-      {(loading ? Array<null>(count).fill(null) : items).map((a, i) =>
-        a ? (
-          <div key={`${a.id}-${i}`} className="w-[130px] shrink-0">
-            <AnimeCard
-              anime={a}
-              size="compact"
-              subCount={epCounts[a.id]?.sub}
-              dubCount={epCounts[a.id]?.dub}
-            />
-          </div>
-        ) : (
-          <div key={i} className="w-[130px] shrink-0">
-            <AnimeCardSkeleton />
-          </div>
-        )
-      )}
+      {Array<null>(count).fill(null).map((_, i) => (
+        <div key={i} className="w-[130px] shrink-0"><AnimeCardSkeleton /></div>
+      ))}
     </HScroll>
   );
 }
 
-// ─── Airing Schedule strip ─────────────────────────────────────────────────
-
-function ScheduleStrip({ items }: { items: AnimeMedia[] }) {
-  const [now, setNow] = useState<number | null>(null);
-
-  useEffect(() => {
-    const updateNow = () => setNow(Math.floor(Date.now() / 1000));
-    updateNow();
-    const timer = setInterval(updateNow, 60_000);
-    return () => clearInterval(timer);
-  }, []);
-
-  if (now === null) return null;
-
-  const scheduled = items
-    .filter((a) => a.nextAiringEpisode?.airingAt)
-    .sort((a, b) => (a.nextAiringEpisode!.airingAt) - (b.nextAiringEpisode!.airingAt))
-    .slice(0, 14);
-
-  if (!scheduled.length) return null;
-
-  function fmtCountdown(secs: number): string {
-    if (secs <= 0) return "Airing now";
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
-    if (h > 0) return `${h}h ${m}m`;
-    return `${m}m`;
-  }
-
-  return (
-    <HScroll>
-      {scheduled.map((a) => {
-        const ep = a.nextAiringEpisode!;
-        const left = ep.airingAt - now;
-        const title =
-          a.title?.english || a.title?.romaji || `Anime #${a.id}`;
-        return (
-          <Link
-            key={`${a.id}-${ep.episode}`}
-            href={`/anime/${a.id}`}
-            className="flex w-[160px] shrink-0 flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--card)] hover:border-[var(--accent)] transition-colors"
-          >
-            <div className="relative h-[80px] overflow-hidden bg-[#1a1d28]">
-              {a.coverImage?.large && (
-                <img
-                  src={a.coverImage.large}
-                  alt=""
-                  className="h-full w-full object-cover opacity-70"
-                />
-              )}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/70 to-transparent" />
-              <span className="absolute bottom-1.5 left-1.5 rounded bg-[#e8621a] px-1.5 py-0.5 font-mono text-[9px] font-bold text-white">
-                EP {ep.episode}
-              </span>
-            </div>
-            <div className="p-2">
-              <p className="mb-1 line-clamp-1 font-mono text-[10px] font-semibold text-white">
-                {title}
-              </p>
-              <span
-                className={`font-mono text-[9px] font-bold ${
-                  left <= 3600 ? "text-[#e8621a]" : "text-[var(--muted)]"
-                }`}
-              >
-                {fmtCountdown(left)}
-              </span>
-            </div>
-          </Link>
-        );
-      })}
-    </HScroll>
-  );
-}
-
-// ─── Latest Updates grid (All / Sub / Dub / Trending / Random) ────────────
-
-const UPDATE_TABS = ["All", "Sub", "Dub", "Trending", "Random"] as const;
-type UpdateTab = (typeof UPDATE_TABS)[number];
-
-function LatestUpdatesGrid({
-  all,
-  trending,
-  epCounts,
-}: {
-  all: AnimeMedia[];
-  trending: AnimeMedia[];
-  epCounts: Record<number, { sub: number; dub: number }>;
-}) {
-  const [tab, setTab] = useState<UpdateTab>("All");
-  const [seed] = useState(() => Math.random());
-
-  const items = useMemo(() => {
-    let pool = all;
-    if (tab === "Trending") pool = trending;
-    if (tab === "Random") {
-      // Deterministic shuffle using seed so it doesn't change on every render
-      let s = seed * 2147483647;
-      const shuffled = [...all].sort(() => {
-        s = (s * 1664525 + 1013904223) % 2147483648;
-        return (s / 2147483648) - 0.5;
-      });
-      return shuffled.slice(0, 12);
-    }
-    if (tab === "Sub") pool = all.filter((a) => (epCounts[a.id]?.sub ?? 0) > 0);
-    if (tab === "Dub") pool = all.filter((a) => (epCounts[a.id]?.dub ?? 0) > 0);
-    return pool.slice(0, 12);
-  }, [tab, all, trending, epCounts, seed]);
-
-  return (
-    <div>
-      <div className="mb-3 flex items-center gap-1 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {UPDATE_TABS.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`shrink-0 rounded px-3 py-1 font-mono text-[11px] font-semibold transition-colors ${
-              tab === t
-                ? "bg-[#e8621a] text-white"
-                : "border border-[var(--border)] text-[var(--muted)] hover:border-[var(--accent)] hover:text-white"
-            }`}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-        {items.map((a, i) => (
-          <AnimeCard
-            key={`${a.id}-${i}`}
-            anime={a}
-            size="compact"
-            subCount={epCounts[a.id]?.sub}
-            dubCount={epCounts[a.id]?.dub}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── A-Z Browse ───────────────────────────────────────────────────────────
+// ─── A-Z Browse ───────────────────────────────────────────────────────────────
 
 const AZ_LETTERS = ["#", "0-9", ...Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZ")];
 
 function AZBrowse() {
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-      <p className="mb-3 font-mono text-[10px] uppercase tracking-widest text-[var(--muted)]">
-        A-Z List · Searching anime order by alphabet name A to Z
+      <p className="mb-3 font-mono text-[10px] font-bold uppercase tracking-widest text-[var(--muted)]">
+        A-Z List · Browse anime alphabetically
       </p>
       <div className="flex flex-wrap gap-1.5">
         {AZ_LETTERS.map((l) => (
           <Link
             key={l}
             href={`/browse?letter=${encodeURIComponent(l)}`}
-            className="rounded border border-[var(--border)] px-2.5 py-1 font-mono text-[11px] font-semibold text-[var(--muted)] hover:border-[var(--accent)] hover:text-white transition-colors"
+            className="rounded border border-[var(--border)] px-2.5 py-1 font-mono text-[11px] font-bold text-[var(--muted)] hover:border-[var(--accent)] hover:text-white transition-colors"
           >
             {l}
           </Link>
@@ -462,12 +228,13 @@ function AZBrowse() {
   );
 }
 
+// ─── Continue Watching ────────────────────────────────────────────────────────
+
 type ContinueItem = {
   id: string;
   animeId: number;
   episodeNumber: number;
   category: string;
-  title?: string | null;
   animeTitle?: string | null;
   poster?: string | null;
   positionSeconds?: number | null;
@@ -480,7 +247,6 @@ function localWatchToContinueItem(w: LocalWatchProgress): ContinueItem {
     animeId: w.animeId,
     episodeNumber: w.episodeNumber,
     category: w.category,
-    title: w.title,
     animeTitle: w.animeTitle,
     poster: w.poster,
     positionSeconds: w.positionSeconds,
@@ -492,11 +258,7 @@ function mergeContinueItems(items: ContinueItem[]) {
   const seen = new Set<number>();
   return [...items]
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-    .filter((item) => {
-      if (seen.has(item.animeId)) return false;
-      seen.add(item.animeId);
-      return true;
-    });
+    .filter((item) => { if (seen.has(item.animeId)) return false; seen.add(item.animeId); return true; });
 }
 
 function formatResumeTime(seconds?: number | null) {
@@ -506,262 +268,143 @@ function formatResumeTime(seconds?: number | null) {
   return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
-// ─── Home feed session cache ──────────────────────────────────────────────
-
-const HOME_CACHE_KEY = "home-feed-v3";
-
-type HomeFeedCache = {
-  trending: AnimeMedia[];
-  fresh: AnimeMedia[];
-  latestReleases: AnimeMedia[];
-  recentlyCompleted: AnimeMedia[];
-};
-
-function readFeedCache(): HomeFeedCache | null {
-  try {
-    const raw = typeof window !== "undefined" ? localStorage.getItem(HOME_CACHE_KEY) : null;
-    if (!raw) return null;
-    return normalizeFeedCache(JSON.parse(raw) as HomeFeedCache);
-  } catch {
-    return null;
-  }
-}
-
-function writeFeedCache(data: HomeFeedCache) {
-  try {
-    localStorage.setItem(HOME_CACHE_KEY, JSON.stringify(normalizeFeedCache(data)));
-  } catch {}
-}
-
-function normalizeFeedCache(data: HomeFeedCache): HomeFeedCache {
-  return {
-    trending: filterAnimeList(data.trending || []),
-    fresh: filterAnimeList(data.fresh || []),
-    latestReleases: filterAnimeList(data.latestReleases || []),
-    recentlyCompleted: filterAnimeList(data.recentlyCompleted || []),
-  };
-}
-
-// ─── Page ─────────────────────────────────────────────────────────────────
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
   const { user } = useAuth();
-  const [loading, setLoading] = useState(true);
-
-  const [trending, setTrending] = useState<AnimeMedia[]>([]);
-  const [fresh, setFresh] = useState<AnimeMedia[]>([]);
-  const [latestReleases, setLatestReleases] = useState<AnimeMedia[]>([]);
-  const [recentlyCompleted, setRecentlyCompleted] = useState<AnimeMedia[]>([]);
   const [continueList, setContinueList] = useState<ContinueItem[]>([]);
 
-  // Anikoto home feed (latest episodes with real sub/dub/total counts)
   const [akFeed, setAkFeed] = useState<AkHomeFeed | null>(null);
-  const [akLoading, setAkLoading] = useState(true);
-  // title → malId map resolved from /api/resolve-titles
-  const [akMalMap, setAkMalMap] = useState<Record<string, number>>({});
+  const [latestItems, setLatestItems] = useState<AkFilterItem[]>([]);
+  const [newReleases, setNewReleases] = useState<AkFilterItem[]>([]);
 
-  const allIds = useMemo(
-    () => [...new Set([...trending, ...fresh, ...latestReleases, ...recentlyCompleted].map((a) => a.id))],
-    [trending, fresh, latestReleases, recentlyCompleted]
-  );
-  const epCounts = useEpisodeCountsMap(allIds);
+  const [feedLoading, setFeedLoading] = useState(true);
+  const [latestLoading, setLatestLoading] = useState(true);
+  const [newLoading, setNewLoading] = useState(true);
 
-  // Resolve Anikoto titles → MAL IDs and seed ep count cache
-  const resolveAndCache = useCallback(async (items: AkHomeItem[]) => {
-    if (!items.length) return;
-    const titles = [...new Set(items.map((i) => i.title).filter(Boolean))];
-    try {
-      const params = new URLSearchParams({ titles: titles.join("|") });
-      const res = await fetch(`/api/resolve-titles?${params}`);
-      if (!res.ok) return;
-      const map = await res.json() as Record<string, number>;
-      setAkMalMap(map);
-      // Seed ep count cache so badges populate immediately for resolved anime
-      for (const item of items) {
-        const malId = map[item.title];
-        if (malId && (item.subCount > 0 || item.dubCount > 0)) {
-          setCachedEpCounts(malId, item.subCount, item.dubCount);
-        }
-      }
-      // Notify useEpisodeCountsMap listeners
-      window.dispatchEvent(new StorageEvent("storage", { key: "ak:epCountMap" }));
-    } catch { /* non-critical */ }
+  const anyLoading = feedLoading || latestLoading || newLoading;
+
+  const resolve = useCallback(async () => {
+    setContinueList(mergeContinueItems(listQualifiedLocalWatchProgress(6).map(localWatchToContinueItem)).slice(0, 6));
   }, []);
 
   useEffect(() => {
-    const cached = readFeedCache();
-    if (cached) {
-      setTrending(cached.trending);
-      setFresh(cached.fresh);
-      setLatestReleases(cached.latestReleases);
-      setRecentlyCompleted(cached.recentlyCompleted);
-      setLoading(false);
-    }
+    resolve();
 
-    // Fetch AniList data
-    (async () => {
-      try {
-        const [trendRes, freshRes, latestRes, completedRes] = await Promise.allSettled([
-          api.getTrending(1, 12),
-          api.getFresh(1, 16),
-          api.getLatestReleases(1, 12),
-          api.getRecentlyCompleted(1, 10),
-        ]);
-        const trendData = trendRes.status === "fulfilled" ? trendRes.value.results || [] : [];
-        const freshItems = freshRes.status === "fulfilled" ? freshRes.value.results || [] : [];
-        const latestItems = latestRes.status === "fulfilled" ? latestRes.value.results || [] : [];
-        const completedItems = completedRes.status === "fulfilled" ? completedRes.value.results || [] : [];
-        const freshData: HomeFeedCache = {
-          trending: filterAnimeList(trendData),
-          fresh: filterAnimeList(freshItems),
-          latestReleases: filterAnimeList(latestItems),
-          recentlyCompleted: filterAnimeList(completedItems),
-        };
-        setTrending(freshData.trending);
-        setFresh(freshData.fresh);
-        setLatestReleases(freshData.latestReleases);
-        setRecentlyCompleted(freshData.recentlyCompleted);
-        writeFeedCache(freshData);
-        const localItems = listQualifiedLocalWatchProgress(12).map(localWatchToContinueItem);
-        if (user) await clientApi.getWatch().catch(() => null);
-        setContinueList(mergeContinueItems(localItems).slice(0, 6));
-      } catch (e) {
-        console.warn("Home feed failed to load:", e);
-        setContinueList(listQualifiedLocalWatchProgress(6).map(localWatchToContinueItem));
-      } finally {
-        setLoading(false);
-      }
-    })();
-
-    // Fetch Anikoto home in parallel — latest episodes with real ep counts
     (async () => {
       try {
         const feed = await akFetchHome();
         setAkFeed(feed);
-        await resolveAndCache(feed.recent);
       } catch { /* non-critical */ } finally {
-        setAkLoading(false);
+        setFeedLoading(false);
       }
     })();
-  }, [user, resolveAndCache]);
+
+    (async () => {
+      try {
+        const items = await akFetchLatestUpdated(20);
+        setLatestItems(items);
+      } catch { /* non-critical */ } finally {
+        setLatestLoading(false);
+      }
+    })();
+
+    (async () => {
+      try {
+        const items = await akFetchNewRelease(16);
+        setNewReleases(items);
+      } catch { /* non-critical */ } finally {
+        setNewLoading(false);
+      }
+    })();
+  }, [resolve, user]);
 
   return (
     <div className="mx-auto max-w-[1520px] px-3 py-5 sm:px-4 sm:py-6">
       <div className="relative">
         <div className="min-w-0 space-y-10">
 
-      {/* Continue Watching */}
-      {continueList.length > 0 && (
-        <section>
-          <SectionHeader title="Continue Watching" href="/profile?tab=continue" label="See all" />
-          <div className="flex flex-col gap-2">
-            {continueList.map((w) => (
-              (() => {
-                const resumeTime = formatResumeTime(w.positionSeconds);
-                return (
-                  <Link
-                    key={w.id}
-                    href={`/anime/${w.animeId}/watch?ep=${w.episodeNumber}&cat=${w.category}`}
-                    className="flex items-center gap-3 rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 font-mono text-xs hover:border-[var(--accent)]"
-                  >
-                    {w.poster ? (
-                      <img
-                        src={w.poster}
-                        alt=""
-                        className="h-12 w-9 shrink-0 rounded object-cover"
-                        loading="lazy"
-                      />
-                    ) : null}
-                    <span className="min-w-0">
-                      <span className="block truncate text-[var(--foreground)]">
-                        {w.animeTitle || `Anime #${w.animeId}`}
+          {/* Continue Watching */}
+          {continueList.length > 0 && (
+            <section>
+              <SectionHeader title="Continue Watching" href="/profile?tab=continue" label="See all" />
+              <div className="flex flex-col gap-2">
+                {continueList.map((w) => {
+                  const resumeTime = formatResumeTime(w.positionSeconds);
+                  return (
+                    <Link
+                      key={w.id}
+                      href={`/anime/${w.animeId}/watch?ep=${w.episodeNumber}&cat=${w.category}`}
+                      className="flex items-center gap-3 rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 font-mono text-xs font-bold hover:border-[var(--accent)]"
+                    >
+                      {w.poster && (
+                        <img src={w.poster} alt="" className="h-12 w-9 shrink-0 rounded object-cover" loading="lazy" />
+                      )}
+                      <span className="min-w-0">
+                        <span className="block truncate text-[var(--foreground)]">
+                          {w.animeTitle || `Anime #${w.animeId}`}
+                        </span>
+                        <span className="text-[var(--muted)]">
+                          EP {w.episodeNumber} ({w.category}){resumeTime ? ` · ${resumeTime}` : ""}
+                        </span>
                       </span>
-                      <span className="text-[var(--muted)]">
-                        EP {w.episodeNumber} ({w.category})
-                        {resumeTime ? ` · ${resumeTime}` : ""}
-                      </span>
-                    </span>
-                  </Link>
-                );
-              })()
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* Loading banner — shows nekos.best gif while data is coming in */}
-      {loading && akLoading && <NekosLoadingBanner visible={loading && akLoading} />}
-
-      {/* Anikoto Latest Episodes — real-time sub/dub counts from Anikoto /home */}
-      <section>
-        <SectionHeader title="Latest Episodes" href="/browse?sort=UPDATED_AT_DESC" label="Browse all" />
-        {akLoading ? (
-          <HScroll>
-            {Array<null>(16).fill(null).map((_, i) => (
-              <div key={i} className="w-[130px] shrink-0"><AnimeCardSkeleton /></div>
-            ))}
-          </HScroll>
-        ) : akFeed?.recent && akFeed.recent.length > 0 ? (
-          <HScroll>
-            {akFeed.recent.map((item, i) => (
-              <AkHomeCard key={`${item.slug}-${i}`} item={item} malId={akMalMap[item.title]} />
-            ))}
-          </HScroll>
-        ) : null}
-      </section>
-
-      {/* Trending */}
-      <section>
-        <SectionHeader title="Trending" href="/browse?sort=TRENDING_DESC" />
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-          {(loading ? Array<null>(12).fill(null) : trending).map((a, i) =>
-            a ? (
-              <AnimeCard
-                key={`${a.id}-${i}`}
-                anime={a}
-                size="compact"
-                subCount={epCounts[a.id]?.sub}
-                dubCount={epCounts[a.id]?.dub}
-              />
-            ) : (
-              <AnimeCardSkeleton key={i} />
-            )
+                    </Link>
+                  );
+                })}
+              </div>
+            </section>
           )}
+
+          {/* Loading banner — nekos.best gif while any section is loading */}
+          {anyLoading && <NekosLoadingBanner />}
+
+          {/* Trending — Anikoto top anime of the day */}
+          <section>
+            <SectionHeader title="Trending" href="/browse?sort=POPULARITY_DESC" />
+            {feedLoading ? (
+              <SkeletonRow count={12} />
+            ) : akFeed?.topAnime?.length ? (
+              <HScroll>
+                {akFeed.topAnime.slice(0, 12).map((item, i) => (
+                  <AkCard key={`top-${item.slug}-${i}`} item={item} />
+                ))}
+              </HScroll>
+            ) : null}
+          </section>
+
+          {/* Latest Episodes — from /latest-updated */}
+          <section>
+            <SectionHeader title="Latest Episodes" href="/browse?sort=UPDATED_AT_DESC" />
+            {latestLoading ? (
+              <SkeletonRow count={16} />
+            ) : latestItems.length > 0 ? (
+              <HScroll>
+                {latestItems.map((item, i) => (
+                  <AkCard key={`latest-${item.slug}-${i}`} item={item} />
+                ))}
+              </HScroll>
+            ) : null}
+          </section>
+
+          {/* New Releases — from /new-release */}
+          <section>
+            <SectionHeader title="New Releases" href="/browse?sort=START_DATE_DESC" />
+            {newLoading ? (
+              <SkeletonRow count={12} />
+            ) : newReleases.length > 0 ? (
+              <HScroll>
+                {newReleases.map((item, i) => (
+                  <AkCard key={`new-${item.slug}-${i}`} item={item} />
+                ))}
+              </HScroll>
+            ) : null}
+          </section>
+
+          {/* A-Z Browse */}
+          <section><AZBrowse /></section>
+
         </div>
-      </section>
 
-      {/* Latest Updates */}
-      <section>
-        <SectionHeader title="Latest Updates" />
-        <LatestUpdatesGrid all={fresh} trending={trending} epCounts={epCounts} />
-      </section>
-
-      {/* Fresh Additions */}
-      <section>
-        <SectionHeader title="Fresh Additions" href="/browse?sort=UPDATED_AT_DESC" />
-        <CardRow items={fresh} loading={loading} count={16} epCounts={epCounts} />
-      </section>
-
-      {/* Latest Releases */}
-      <section>
-        <SectionHeader title="Latest Releases" href="/browse?status=RELEASING&sort=START_DATE_DESC" />
-        <CardRow items={latestReleases} loading={loading} count={12} epCounts={epCounts} />
-      </section>
-
-      {/* Recently Completed */}
-      <section>
-        <SectionHeader title="Recently Completed" href="/browse?status=FINISHED&sort=END_DATE_DESC" />
-        <CardRow items={recentlyCompleted} loading={loading} count={10} epCounts={epCounts} />
-      </section>
-
-      {/* A-Z Browse */}
-      <section>
-        <AZBrowse />
-      </section>
-
-        </div>{/* end main content */}
-
-        {/* Cute grill widget, fixed above all desktop content. */}
         <aside className="pointer-events-none fixed bottom-0 right-0 z-[9999] hidden xl:block">
           <CuteGrillWidget />
         </aside>

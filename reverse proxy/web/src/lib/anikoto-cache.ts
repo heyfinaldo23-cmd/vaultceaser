@@ -336,6 +336,7 @@ export async function akFetchSeasons(anikotoId: number): Promise<AkSeasonEntry[]
 export interface AkHomeFeed {
   spotlight: AkHomeItem[];
   recent: AkHomeItem[];
+  topAnime: AkHomeItem[];
 }
 
 /**
@@ -347,12 +348,38 @@ export async function akFetchHome(): Promise<AkHomeFeed> {
   if (cached && Date.now() - cached.ts < TTL_HOME) return cached.data;
 
   const raw = await proxyFetch("/home");
-  if (!raw) return { spotlight: [], recent: [] };
+  if (!raw) return { spotlight: [], recent: [], topAnime: [] };
 
-  const { spotlight, recent } = parseHomeHtml(raw);
-  const data: AkHomeFeed = { spotlight, recent };
+  const { spotlight, recent, trending: topAnime } = parseHomeHtml(raw);
+  const data: AkHomeFeed = { spotlight, recent, topAnime };
   lsSet(LS_HOME, { data, ts: Date.now() });
   return data;
+}
+
+// ─── /latest-updated and /new-release ────────────────────────────────────────
+
+const LS_LATEST = "ak:latest";
+const LS_NEW_RELEASE = "ak:newRelease";
+const TTL_LIST = 10 * 60 * 1000; // 10 min
+
+export async function akFetchLatestUpdated(limit = 20): Promise<AkFilterItem[]> {
+  const cached = lsGet<{ data: AkFilterItem[]; ts: number }>(LS_LATEST);
+  if (cached && Date.now() - cached.ts < TTL_LIST) return cached.data.slice(0, limit);
+  const raw = await proxyFetch("/latest-updated");
+  if (!raw) return [];
+  const items = parseFilterPage(raw).slice(0, limit);
+  lsSet(LS_LATEST, { data: items, ts: Date.now() });
+  return items;
+}
+
+export async function akFetchNewRelease(limit = 16): Promise<AkFilterItem[]> {
+  const cached = lsGet<{ data: AkFilterItem[]; ts: number }>(LS_NEW_RELEASE);
+  if (cached && Date.now() - cached.ts < TTL_LIST) return cached.data.slice(0, limit);
+  const raw = await proxyFetch("/new-release");
+  if (!raw) return [];
+  const items = parseFilterPage(raw).slice(0, limit);
+  lsSet(LS_NEW_RELEASE, { data: items, ts: Date.now() });
+  return items;
 }
 
 

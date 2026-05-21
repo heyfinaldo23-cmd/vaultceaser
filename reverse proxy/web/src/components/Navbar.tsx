@@ -150,15 +150,15 @@ export default function Navbar() {
     <header className="sticky top-0 z-50 border-b border-[var(--border)] bg-[var(--background)]/95 backdrop-blur-sm">
       <div ref={ref} className="mx-auto max-w-5xl px-3 sm:px-4">
         <div className="flex h-[52px] items-center gap-3 sm:gap-4">
-          <Link href="/" className="shrink-0 font-semibold tracking-tight text-[var(--accent)]">
-            OtakuVault
+          <Link href="/" className="shrink-0 font-mono font-extrabold tracking-tight text-[var(--accent)]">
+            OtakuBox
           </Link>
 
           <div className="hidden flex-1 sm:block">{searchBox(false)}</div>
 
           <nav className="ml-auto flex items-center gap-3 text-sm">
-            <Link href="/browse" className="text-[var(--muted)] hover:text-[var(--foreground)]">
-              Browse
+            <Link href="/browse" className="font-mono font-bold text-[var(--muted)] hover:text-[var(--foreground)]">
+              Filter/Search
             </Link>
             <Link
               href={user ? "/profile" : "/login"}

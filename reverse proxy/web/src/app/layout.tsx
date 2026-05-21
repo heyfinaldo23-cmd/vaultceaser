@@ -9,8 +9,8 @@ const jetbrains = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" }
 const outfit = Outfit({ subsets: ["latin"], variable: "--font-display", weight: ["400", "500", "600", "700"] });
 
 export const metadata: Metadata = {
-  title: "OtakuVault — Watch Anime",
-  description: "Lightweight anime streaming. Safe catalogue, continue watching, bookmarks.",
+  title: "OtakuBox — Watch Anime",
+  description: "Stream anime free. Sub & dub, no ads, no sign-up.",
 };
 
 export default function RootLayout({

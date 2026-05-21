@@ -226,11 +226,12 @@ function parseHomeItems(section: Element | null): AkHomeItem[] {
     const posterEl = item.querySelector(".ani.poster, .poster[data-tip]") as HTMLElement | null;
     const anikotoId = posterEl ? parseInt(posterEl.dataset.tip ?? "0", 10) || null : null;
 
-    // href: prefer the watch link on poster anchor, fall back to .name link
+    // item itself may be <a class="item rank1"> (top-anime); descendants otherwise
+    const selfHref = item.tagName === "A" ? (item.getAttribute("href") ?? "") : "";
     const watchAnchor =
       posterEl?.querySelector("a[href*='/watch/']") ??
       item.querySelector("a[href*='/watch/']");
-    const href = watchAnchor?.getAttribute("href") ?? "";
+    const href = watchAnchor?.getAttribute("href") ?? selfHref;
     const slug = slugFromUrl(href);
 
     const poster = item.querySelector("img")?.getAttribute("src") ?? "";
