@@ -19,6 +19,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { loadPlayerPrefs, savePlayerPrefs, type PlayerPrefs } from "@/lib/player-prefs";
 import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
 import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
+import { getAnikotoEpCounts } from "@/lib/anikoto-cache";
 import {
   getLatestLocalWatchForAnime,
   getLocalWatchProgress,
@@ -249,14 +250,26 @@ function WatchPageInner() {
       setEpCounts({ sub: subN, dub: dubN });
       if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
 
-      // Async: try to get a better dub count from the batch endpoint (backend may have fresher data)
-      fetchEpisodeCounts([id]).then((counts) => {
-        const c = counts[id];
-        if (!c) return;
-        const betterSub = Math.max(subN, c.sub);
-        const betterDub = Math.max(dubN, c.dub);
-        setEpCounts({ sub: betterSub, dub: betterDub });
-        if (betterSub > 0 || betterDub > 0) rememberEpisodeCounts({ [id]: { sub: betterSub, dub: betterDub } });
+      // Background: get better dub count from Anikoto; also build synthetic dub list if missing
+      const titleStr = animeTitle(info);
+      getAnikotoEpCounts(id, titleStr).then((akCounts) => {
+        if (!akCounts) return;
+        setEpCounts((prev) => {
+          const s = Math.max(prev.sub, akCounts.sub);
+          const d = Math.max(prev.dub, akCounts.dub);
+          if (s === prev.sub && d === prev.dub) return prev;
+          rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
+          return { sub: s, dub: d };
+        });
+        // If backend had no dub list but Anikoto says there are dub episodes, generate synthetic
+        if (akCounts.dub > 0 && dubList.length === 0) {
+          const synthDub: EpisodeData[] = Array.from({ length: akCounts.dub }, (_, i) => ({
+            id: `mal:${id}:${i + 1}`,
+            number: i + 1,
+            title: `Episode ${i + 1}`,
+          }));
+          setMegaplayEps((prev) => prev ? { ...prev, dub: synthDub } : prev);
+        }
       }).catch(() => {});
 
       const cat = searchParams.get("cat") === "dub" ? "dub" : "sub";

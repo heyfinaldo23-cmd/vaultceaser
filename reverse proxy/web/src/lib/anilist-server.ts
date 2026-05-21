@@ -83,11 +83,17 @@ async function anilistGql<T>(
   }
 }
 
-/** Map AniList Media node for relation edges (strip nested relations to avoid cycles). */
+/**
+ * Map AniList Media node for relation edges.
+ * IMPORTANT: site routes by MAL ID, so use idMal as primary `id` when available.
+ * AniList-only entries (no MAL ID) fall back to AniList ID.
+ */
 function mapRelationNode(node: Record<string, unknown>): AnimeMedia {
+  const anilistId = node.id as number;
+  const malId = (node.idMal as number) || undefined;
   return {
-    id: node.id as number,
-    mal_id: (node.idMal as number) ?? undefined,
+    id: malId ?? anilistId,
+    mal_id: malId,
     title: node.title as AnimeMedia["title"],
     coverImage: (node.coverImage as AnimeMedia["coverImage"]) ?? {},
     bannerImage: (node.bannerImage as string) ?? "",
@@ -143,6 +149,9 @@ export async function fetchAnilistById(anilistId: number): Promise<AnimeMedia | 
 }
 
 function mapAnilistMedia(m: Record<string, unknown>): AnimeMedia {
+  const anilistId = m.id as number;
+  const malId = (m.idMal as number) || undefined;
+
   const relations = m.relations as
     | { edges?: Array<{ relationType: string; node: Record<string, unknown> }> }
     | undefined;
@@ -160,8 +169,8 @@ function mapAnilistMedia(m: Record<string, unknown>): AnimeMedia {
     }));
 
   return {
-    id: m.id as number,
-    mal_id: (m.idMal as number) ?? undefined,
+    id: malId ?? anilistId,
+    mal_id: malId,
     title: m.title as AnimeMedia["title"],
     coverImage: (m.coverImage as AnimeMedia["coverImage"]) ?? {},
     bannerImage: (m.bannerImage as string) ?? "",

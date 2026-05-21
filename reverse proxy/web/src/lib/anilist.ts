@@ -475,6 +475,7 @@ export const anilist = {
         Page(page: 1, perPage: 8) {
           media(type: ANIME, search: $search, sort: [SEARCH_MATCH], isAdult: false) {
             id
+            idMal
             title { romaji english native }
             coverImage { large }
             format
@@ -487,7 +488,13 @@ export const anilist = {
     `;
     const key = `suggest:${q}`;
     const data = await gql<PageGql>(query, { search: q }, key);
-    return { results: data.Page.media };
+    // Remap so .id is the MAL id when available (site routes by MAL id)
+    const media = data.Page.media.map((m) => {
+      const raw = m as AnimeMedia & { idMal?: number };
+      if (raw.idMal) return { ...m, id: raw.idMal };
+      return m;
+    });
+    return { results: media };
   },
 
   getGenres: async (): Promise<GenreData> => {

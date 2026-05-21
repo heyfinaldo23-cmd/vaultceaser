@@ -26,6 +26,7 @@ import { clientApi } from "@/lib/client-api";
 import { useAuth } from "@/components/AuthProvider";
 import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
 import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
+import { getAnikotoEpCounts } from "@/lib/anikoto-cache";
 import { filterExternalLinks, isBlockedExternalLink } from "@/lib/external-links";
 
 type EpCounts = { sub: number; dub: number };
@@ -88,6 +89,19 @@ export default function AnimeOverviewPage() {
       }
       setEpCounts({ sub: subN, dub: dubN });
       if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
+
+      // Background: get dub count from Anikoto (backend often reports 0 dub even when it works)
+      const titleStr = animeTitle(info);
+      getAnikotoEpCounts(id, titleStr).then((akCounts) => {
+        if (!akCounts) return;
+        setEpCounts((prev) => {
+          const s = Math.max(prev.sub, akCounts.sub);
+          const d = Math.max(prev.dub, akCounts.dub);
+          if (s === prev.sub && d === prev.dub) return prev;
+          rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
+          return { sub: s, dub: d };
+        });
+      }).catch(() => {});
 
       // If episodes call failed, try batch counts endpoint for fresher data
       if (epRes.status === "rejected" && subN === 0 && dubN === 0) {

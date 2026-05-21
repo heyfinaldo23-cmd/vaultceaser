@@ -203,7 +203,6 @@ async function fetchJikanDetail(malId: number): Promise<AnimeMedia | null> {
 function jikanToAnimeMedia(d: Record<string, unknown>, malId: number): AnimeMedia {
   const images = d.images as Record<string, { image_url?: string; large_image_url?: string }> | undefined;
   const jpg = images?.jpg;
-  const title = d.title_english || d.title;
   const relations = d.relations as Array<{ relation: string; entry: Array<{ mal_id: number; type: string; name: string }> }> | undefined;
 
   const RELATION_MAP: Record<string, string> = {
@@ -280,10 +279,39 @@ async function proxyToBackend(request: Request, path: string[]) {
   });
 }
 
+const META_HOST = "anikototv.to";
+const META_ORIGIN = `https://${META_HOST}`;
+const STRIP_HEADERS = new Set(["cf-ray", "cf-cache-status", "server", "via", "x-powered-by", "x-frame-options", "set-cookie"]);
+
+async function metaProxy(target: string) {
+  if (!target || !target.startsWith("/")) return notFound();
+  const res = await fetch(`${META_ORIGIN}${target}`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Referer": `${META_ORIGIN}/`,
+      "X-Requested-With": "XMLHttpRequest",
+      "Accept": "text/html,application/json,*/*;q=0.9",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+    cache: "no-store",
+  });
+  const body = await res.text();
+  const outHeaders = new Headers();
+  outHeaders.set("Content-Type", res.headers.get("content-type") || "text/html; charset=utf-8");
+  outHeaders.set("Cache-Control", "public, max-age=300, stale-while-revalidate=3600");
+  return new Response(body, { status: res.status, headers: outHeaders });
+}
+
 export async function GET(request: Request, context: RouteContext) {
   const { path = [] } = await context.params;
   const pathname = path.join("/");
   const url = new URL(request.url);
+
+  // Thin passthrough proxy — source hidden from browser
+  if (pathname === "meta-proxy") {
+    const target = url.searchParams.get("p") ?? "";
+    return metaProxy(target);
+  }
 
   if (pathname === "_static-meta") return json(staticMeta());
   if (pathname === "search") return json(staticSearch(url.searchParams));

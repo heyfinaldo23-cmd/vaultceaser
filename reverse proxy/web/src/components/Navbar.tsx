@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Search, User } from "lucide-react";
 import { api } from "@/lib/api";
+import { anilist } from "@/lib/anilist";
 import { filterAnimeList } from "@/lib/anime-filters";
 import { animeTitle } from "@/lib/anime-title";
 import { useAuth } from "@/components/AuthProvider";
@@ -43,7 +44,19 @@ export default function Navbar() {
     debounce.current = setTimeout(async () => {
       try {
         const data = await api.getSuggestions(val.trim());
-        const list = filterAnimeList(data.results || []).slice(0, 6);
+        let list = filterAnimeList(data.results || []).slice(0, 6);
+
+        // Fallback to AniList when static catalog returns nothing (e.g. Bunny Girl, DMC2)
+        if (list.length < 2) {
+          try {
+            const alData = await anilist.getSuggestions(val.trim());
+            const alList = filterAnimeList(alData.results || []).slice(0, 6);
+            if (alList.length > list.length) list = alList;
+          } catch {
+            // AniList failed, continue with what we have
+          }
+        }
+
         setSuggestions(
           list.map((a) => {
             const raw = a as {
