@@ -323,6 +323,28 @@ export async function GET(request: Request, context: RouteContext) {
       const m = resolveByTitle(t);
       if (m?.id) result[t] = m.id;
     }
+
+    // For titles not in static catalog, try Jikan search (handles new/seasonal shows)
+    const unresolved = titles.filter((t) => !result[t]);
+    if (unresolved.length > 0) {
+      const jikanResults = await Promise.allSettled(
+        unresolved.map(async (title) => {
+          const r = await fetch(
+            `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=1&sfw=true`,
+            { signal: AbortSignal.timeout(4000) } as RequestInit
+          );
+          if (!r.ok) return { title, malId: null as number | null };
+          const j = (await r.json()) as { data?: Array<{ mal_id: number }> };
+          return { title, malId: j.data?.[0]?.mal_id ?? null };
+        })
+      );
+      for (const r of jikanResults) {
+        if (r.status === "fulfilled" && r.value.malId) {
+          result[r.value.title] = r.value.malId;
+        }
+      }
+    }
+
     return json(result);
   }
 

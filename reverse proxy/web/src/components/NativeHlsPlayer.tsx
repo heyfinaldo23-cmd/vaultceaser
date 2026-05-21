@@ -10,6 +10,7 @@ import {
   Settings2,
   Volume2,
   VolumeX,
+  Gauge,
 } from "lucide-react";
 
 type StreamCategory = "sub" | "dub";
@@ -58,6 +59,11 @@ type CaptionOption = {
   label: string;
 };
 
+type QualityLevel = {
+  index: number;
+  label: string;
+};
+
 type Props = {
   sourceId: string;
   category: StreamCategory;
@@ -71,6 +77,7 @@ type Props = {
 };
 
 const CAPTION_PREFS_KEY = "ov-caption-prefs";
+const NEKOS_CATS = ["nod", "wave", "think", "happy", "smile", "bored"];
 
 const DEFAULT_CAPTION_PREFS: CaptionPrefs = {
   size: 115,
@@ -185,6 +192,7 @@ export default function NativeHlsPlayer({
   onError,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const autoSkipRef = useRef(autoSkip);
   const captionsEnabledRef = useRef(true);
   const selectedCaptionKeyRef = useRef("");
@@ -205,6 +213,22 @@ export default function NativeHlsPlayer({
   const [activeCaption, setActiveCaption] = useState("");
   const [captionOptions, setCaptionOptions] = useState<CaptionOption[]>([]);
   const [selectedCaptionKey, setSelectedCaptionKey] = useState("");
+  const [hlsLevels, setHlsLevels] = useState<QualityLevel[]>([]);
+  const [hlsLevel, setHlsLevel] = useState(-1);
+  const [qualityPanelOpen, setQualityPanelOpen] = useState(false);
+  const [loadingGif, setLoadingGif] = useState<string | null>(null);
+
+  // Fetch loading gif once on mount
+  useEffect(() => {
+    const cat = NEKOS_CATS[Math.floor(Math.random() * NEKOS_CATS.length)];
+    fetch(`https://nekos.best/api/v2/${cat}?amount=1`)
+      .then((r) => r.json())
+      .then((d) => {
+        const url = d?.results?.[0]?.url as string | undefined;
+        if (url) setLoadingGif(url);
+      })
+      .catch(() => null);
+  }, []);
 
   const cueBackground =
     captionPrefs.background === "solid"
@@ -253,6 +277,14 @@ export default function NativeHlsPlayer({
     setActiveCaption("");
   };
 
+  const selectLevel = (level: number) => {
+    setHlsLevel(level);
+    if (hlsRef.current) {
+      hlsRef.current.currentLevel = level;
+    }
+    setQualityPanelOpen(false);
+  };
+
   useEffect(() => {
     resumeAtRef.current = resumeAt;
   }, [resumeAt, sourceId, category]);
@@ -269,6 +301,11 @@ export default function NativeHlsPlayer({
     let outro: { start: number; end: number } | null = null;
     let didResume = false;
     let endedSent = false;
+
+    // Reset quality state on new source
+    hlsRef.current = null;
+    setHlsLevels([]);
+    setHlsLevel(-1);
 
     const duration = () => (Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null);
     const progress = (): NativePlayerProgress => ({
@@ -430,9 +467,21 @@ export default function NativeHlsPlayer({
 
         if (Hls.isSupported()) {
           hls = new Hls({ enableWorker: true });
+          hlsRef.current = hls;
           hls.loadSource(file);
           hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          hls.on(Hls.Events.MANIFEST_PARSED, (_evt, hlsData) => {
+            // Populate quality levels
+            const levels: QualityLevel[] = hlsData.levels.map(
+              (l: { height?: number; bitrate?: number }, i: number) => ({
+                index: i,
+                label: l.height ? `${l.height}p` : `Level ${i + 1}`,
+              })
+            );
+            if (levels.length > 1) {
+              setHlsLevels(levels);
+              setHlsLevel(-1);
+            }
             tryResume();
             void tryPlay();
           });
@@ -466,18 +515,19 @@ export default function NativeHlsPlayer({
       video.removeEventListener("pause", handlePause);
       video.removeEventListener("volumechange", handleVolumeChange);
       hls?.destroy();
+      hlsRef.current = null;
       clearTracks(video);
     };
   }, [autoPlay, category, onEnded, onError, onProgress, onReady, sourceId]);
 
   useEffect(() => {
-    if (!playing || captionPanelOpen) {
+    if (!playing || captionPanelOpen || qualityPanelOpen) {
       setControlsVisible(true);
       return;
     }
     const timer = window.setTimeout(() => setControlsVisible(false), 2600);
     return () => window.clearTimeout(timer);
-  }, [captionPanelOpen, controlsVisible, playing]);
+  }, [captionPanelOpen, qualityPanelOpen, controlsVisible, playing]);
 
   const togglePlay = () => {
     const video = videoRef.current;
@@ -523,11 +573,14 @@ export default function NativeHlsPlayer({
 
   const progressPercent = durationSeconds ? Math.min(100, Math.max(0, (currentTime / durationSeconds) * 100)) : 0;
 
+  const currentQualityLabel =
+    hlsLevel === -1 ? "Auto" : (hlsLevels.find((l) => l.index === hlsLevel)?.label ?? "Quality");
+
   return (
     <div
       className="group relative h-full w-full overflow-hidden bg-black"
       onMouseMove={() => setControlsVisible(true)}
-      onMouseLeave={() => playing && !captionPanelOpen && setControlsVisible(false)}
+      onMouseLeave={() => playing && !captionPanelOpen && !qualityPanelOpen && setControlsVisible(false)}
     >
       <style>{`
         .ov-native-video::cue {
@@ -545,11 +598,23 @@ export default function NativeHlsPlayer({
         crossOrigin="anonymous"
         onClick={togglePlay}
       />
+
+      {/* Loading overlay with nekos gif */}
       {loading && !error ? (
-        <div className="pointer-events-none absolute left-3 top-3 rounded-md border border-white/10 bg-black/55 px-3 py-2 font-mono text-[11px] text-white/70 backdrop-blur-sm">
-          Loading stream...
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/60">
+          {loadingGif ? (
+            <img
+              src={loadingGif}
+              alt="loading"
+              className="h-20 w-20 rounded-full object-cover ring-2 ring-white/10"
+            />
+          ) : (
+            <div className="h-20 w-20 animate-pulse rounded-full bg-white/10" />
+          )}
+          <p className="font-mono text-xs text-white/55">Loading stream…</p>
         </div>
       ) : null}
+
       {autoplayBlocked && !error ? (
         <button
           type="button"
@@ -579,78 +644,32 @@ export default function NativeHlsPlayer({
           </span>
         </div>
       ) : null}
-      <div
-        className={`absolute inset-x-0 bottom-0 px-2 pb-2 transition-opacity duration-150 ${
-          controlsVisible || !playing ? "opacity-100" : "opacity-0"
-        }`}
-      >
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={progressPercent}
-          onChange={(e) => seekToPercent(Number(e.currentTarget.value))}
-          className="mb-1 h-1 w-full cursor-pointer accent-[#e8621a]"
-          aria-label="Seek"
-        />
-        <div className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/62 px-2 py-1.5 shadow-lg shadow-black/25 backdrop-blur-sm">
+
+      {/* Quality panel */}
+      {qualityPanelOpen && (
+        <div className="absolute bottom-12 right-2 w-[min(88vw,200px)] rounded-lg border border-white/10 bg-black/90 p-2 text-white shadow-xl backdrop-blur-md">
+          <p className="mb-1.5 px-1 font-mono text-[9px] font-bold uppercase tracking-widest text-white/50">Quality</p>
           <button
             type="button"
-            onClick={togglePlay}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/90 hover:bg-white/10"
-            aria-label={playing ? "Pause" : "Play"}
+            onClick={() => selectLevel(-1)}
+            className={`w-full rounded-md px-3 py-1.5 text-left font-mono text-[11px] font-semibold transition-colors ${hlsLevel === -1 ? "bg-[#e8621a]/20 text-[#e8621a]" : "text-white/70 hover:bg-white/10 hover:text-white"}`}
           >
-            {playing ? <Pause className="h-4 w-4 fill-current" /> : <Play className="h-4 w-4 fill-current" />}
+            Auto (ABR)
           </button>
-          <span className="w-20 shrink-0 font-mono text-[10px] text-white/65">
-            {formatTime(currentTime)} / {formatTime(durationSeconds)}
-          </span>
-          <button
-            type="button"
-            onClick={toggleMute}
-            className="hidden h-7 w-7 items-center justify-center rounded-md text-white/65 hover:bg-white/10 hover:text-white sm:flex"
-            aria-label={muted ? "Unmute" : "Mute"}
-          >
-            {muted || volume === 0 ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
-          </button>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={muted ? 0 : volume}
-            onChange={(e) => setPlayerVolume(Number(e.currentTarget.value))}
-            className="hidden h-1 w-16 accent-white sm:block"
-            aria-label="Volume"
-          />
-          <div className="min-w-0 flex-1" />
-          <button
-            type="button"
-            onClick={() => setCaptionsEnabled((v) => !v)}
-            className={`flex h-7 items-center gap-1 rounded-md px-2 font-mono text-[10px] font-semibold ${
-              captionsEnabled ? "bg-white/15 text-white" : "text-white/55 hover:bg-white/10 hover:text-white"
-            }`}
-          >
-            <Captions className="h-3.5 w-3.5" /> CC
-          </button>
-          <button
-            type="button"
-            onClick={() => setCaptionPanelOpen((v) => !v)}
-            className="flex h-7 items-center gap-1 rounded-md px-2 font-mono text-[10px] font-semibold text-white/60 hover:bg-white/10 hover:text-white"
-          >
-            <Settings2 className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Style</span>
-          </button>
-          <button
-            type="button"
-            onClick={requestFullscreen}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-white/65 hover:bg-white/10 hover:text-white"
-            aria-label="Fullscreen"
-          >
-            <Maximize2 className="h-3.5 w-3.5" />
-          </button>
+          {[...hlsLevels].reverse().map((lvl) => (
+            <button
+              key={lvl.index}
+              type="button"
+              onClick={() => selectLevel(lvl.index)}
+              className={`w-full rounded-md px-3 py-1.5 text-left font-mono text-[11px] font-semibold transition-colors ${hlsLevel === lvl.index ? "bg-[#e8621a]/20 text-[#e8621a]" : "text-white/70 hover:bg-white/10 hover:text-white"}`}
+            >
+              {lvl.label}
+            </button>
+          ))}
         </div>
-      </div>
+      )}
+
+      {/* Caption settings panel */}
       {captionPanelOpen && (
         <div className="absolute bottom-12 right-2 w-[min(88vw,260px)] rounded-lg border border-white/10 bg-black/82 p-3 text-white shadow-xl shadow-black/40 backdrop-blur-md">
           <div className="mb-2 flex items-center justify-between">
@@ -723,6 +742,100 @@ export default function NativeHlsPlayer({
           </button>
         </div>
       )}
+
+      {/* Controls bar */}
+      <div
+        className={`absolute inset-x-0 bottom-0 px-2 pb-2 transition-opacity duration-150 ${
+          controlsVisible || !playing ? "opacity-100" : "opacity-0"
+        }`}
+      >
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={progressPercent}
+          onChange={(e) => seekToPercent(Number(e.currentTarget.value))}
+          className="mb-1 h-1 w-full cursor-pointer accent-[#e8621a]"
+          aria-label="Seek"
+        />
+        <div className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/62 px-2 py-1.5 shadow-lg shadow-black/25 backdrop-blur-sm">
+          <button
+            type="button"
+            onClick={togglePlay}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/90 hover:bg-white/10"
+            aria-label={playing ? "Pause" : "Play"}
+          >
+            {playing ? <Pause className="h-4 w-4 fill-current" /> : <Play className="h-4 w-4 fill-current" />}
+          </button>
+          <span className="w-20 shrink-0 font-mono text-[10px] text-white/65">
+            {formatTime(currentTime)} / {formatTime(durationSeconds)}
+          </span>
+          <button
+            type="button"
+            onClick={toggleMute}
+            className="hidden h-7 w-7 items-center justify-center rounded-md text-white/65 hover:bg-white/10 hover:text-white sm:flex"
+            aria-label={muted ? "Unmute" : "Mute"}
+          >
+            {muted || volume === 0 ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={muted ? 0 : volume}
+            onChange={(e) => setPlayerVolume(Number(e.currentTarget.value))}
+            className="hidden h-1 w-16 accent-white sm:block"
+            aria-label="Volume"
+          />
+          <div className="min-w-0 flex-1" />
+
+          {/* Quality selector button */}
+          {hlsLevels.length > 0 && (
+            <button
+              type="button"
+              onClick={() => { setQualityPanelOpen((v) => !v); setCaptionPanelOpen(false); }}
+              className={`flex h-7 items-center gap-1 rounded-md px-2 font-mono text-[10px] font-semibold ${
+                qualityPanelOpen ? "bg-white/15 text-white" : "text-white/55 hover:bg-white/10 hover:text-white"
+              }`}
+            >
+              <Gauge className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{currentQualityLabel}</span>
+            </button>
+          )}
+
+          {/* CC toggle */}
+          <button
+            type="button"
+            onClick={() => setCaptionsEnabled((v) => !v)}
+            className={`flex h-7 items-center gap-1 rounded-md px-2 font-mono text-[10px] font-semibold ${
+              captionsEnabled ? "bg-white/15 text-white" : "text-white/55 hover:bg-white/10 hover:text-white"
+            }`}
+          >
+            <Captions className="h-3.5 w-3.5" /> CC
+          </button>
+
+          {/* Caption style button */}
+          <button
+            type="button"
+            onClick={() => { setCaptionPanelOpen((v) => !v); setQualityPanelOpen(false); }}
+            className="flex h-7 items-center gap-1 rounded-md px-2 font-mono text-[10px] font-semibold text-white/60 hover:bg-white/10 hover:text-white"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Style</span>
+          </button>
+
+          {/* Browser fullscreen */}
+          <button
+            type="button"
+            onClick={requestFullscreen}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-white/65 hover:bg-white/10 hover:text-white"
+            aria-label="Fullscreen"
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

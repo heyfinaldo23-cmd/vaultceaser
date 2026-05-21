@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, Suspense } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Bookmark, X } from "lucide-react";
+import { Bookmark } from "lucide-react";
 import GenreChips from "@/components/GenreChips";
 import EpisodeCountBadges from "@/components/EpisodeCountBadges";
 import NativeHlsPlayer, { type NativePlayerProgress } from "@/components/NativeHlsPlayer";
@@ -24,6 +24,7 @@ import type { AkEpisodeEntry } from "@/lib/anikoto";
 import {
   getLatestLocalWatchForAnime,
   getLocalWatchProgress,
+  listLocalWatchProgressForAnime,
   qualifiesForContinue,
   upsertLocalWatchProgress,
 } from "@/lib/watch-progress";
@@ -93,11 +94,19 @@ function WatchPageInner() {
   useEffect(() => { playerDurationSecondsRef.current = playerDurationSeconds; }, [playerDurationSeconds]);
 
   useEffect(() => {
-    if (!user) { setWatchedEpisodeNumbers([]); return; }
+    // Load from local progress immediately — works without auth
+    const local = listLocalWatchProgressForAnime(id);
+    const qualifiedNums = local.filter((w) => w.qualified).map((w) => w.episodeNumber);
+    if (qualifiedNums.length) {
+      const maxLocal = Math.max(...qualifiedNums);
+      setWatchedEpisodeNumbers(Array.from({ length: maxLocal }, (_, i) => i + 1));
+    }
+
+    if (!user) return;
     clientApi.getWatch()
       .then((r) => {
         const maxWatched = Math.max(0, ...r.items.filter((w) => w.animeId === id).map((w) => w.episodeNumber));
-        setWatchedEpisodeNumbers(Array.from({ length: maxWatched }, (_, i) => i + 1));
+        if (maxWatched > 0) setWatchedEpisodeNumbers(Array.from({ length: maxWatched }, (_, i) => i + 1));
       })
       .catch(() => {});
   }, [user, id]);
@@ -416,22 +425,7 @@ function WatchPageInner() {
   useEffect(() => { hasNextRef.current = hasNext; }, [hasNext]);
 
   const toggleExpandedPlayer = useCallback(() => {
-    if (expanded) {
-      setExpanded(false);
-      if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
-      return;
-    }
-    setExpanded(true);
-    const el = playerShellRef.current;
-    if (el?.requestFullscreen) void el.requestFullscreen().catch(() => {});
-  }, [expanded]);
-
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      if (!document.fullscreenElement) setExpanded(false);
-    };
-    document.addEventListener("fullscreenchange", onFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+    setExpanded((prev) => !prev);
   }, []);
 
   const handlePlayerReady = useCallback((data: NativePlayerProgress) => {
@@ -524,77 +518,29 @@ function WatchPageInner() {
 
   return (
     <div className="pb-10">
-      <section className={cn("relative mx-auto mt-3 max-w-6xl overflow-hidden rounded-2xl border border-white/10 bg-[#0d0f14]/88 p-2 shadow-2xl shadow-black/30 transition-opacity sm:p-3", dimChrome && "opacity-25")}>
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(224,122,58,0.14),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.04),transparent_45%)]" />
-        <div className="relative aspect-[16/9] min-h-[190px] max-h-[300px] w-full overflow-hidden rounded-xl bg-[var(--card)] sm:aspect-[21/8] sm:min-h-[185px]">
-          {banner ? <img src={banner} alt="" className="h-full w-full object-cover" /> : null}
-          <div className="absolute inset-0 bg-gradient-to-t from-[#0a0b0d] via-[#0a0b0d]/70 to-transparent" />
-          <div className="absolute inset-0 bg-gradient-to-r from-[#0a0b0d]/80 via-transparent to-transparent" />
-          <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-5">
-            <nav className="mb-2 font-mono text-[10px] uppercase tracking-widest text-white/50">
+      {/* ── Main grid: player (left) + episode sidebar (right) ── */}
+      <div className={cn(
+        "mx-auto px-2 sm:px-3 transition-all duration-200",
+        expanded ? "mt-0 max-w-full" : "mt-3 max-w-7xl"
+      )}>
+        <div className={cn("flex gap-3 xl:gap-4", expanded ? "flex-col" : "flex-col xl:flex-row")}>
+
+          {/* ── Left col: player + controls ── */}
+          <div className="min-w-0 flex-1">
+            {/* Breadcrumb */}
+            <nav className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-white/40">
               <Link href="/" className="hover:text-[var(--accent)]">Home</Link>
-              <span className="mx-1.5">/</span>
-              <Link href={`/anime/${id}`} className="hover:text-[var(--accent)]">{title}</Link>
-              <span className="mx-1.5">/</span>
-              <span className="text-white/70">Watch</span>
+              <span>/</span>
+              <Link href={`/anime/${id}`} className="max-w-[180px] truncate hover:text-[var(--accent)]">{title}</Link>
+              <span>/</span>
+              <span className="text-white/60">Watch</span>
             </nav>
-            <div className="flex flex-wrap items-end justify-between gap-2 sm:gap-3">
-              <div className="min-w-0 flex-1">
-                <h1 className="font-display text-xl font-bold tracking-tight text-white sm:text-3xl md:text-[2.35rem]">{title}</h1>
-                <EpisodeCountBadges subCount={epCounts.sub} dubCount={epCounts.dub} total={plannedEps} format={anime.format} className="mt-2" />
-              </div>
-              <button type="button" onClick={toggleBookmark} className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 font-mono text-xs font-medium backdrop-blur-md transition-colors ${bookmarked ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]" : "border-white/20 bg-black/40 text-white hover:border-[var(--accent)]"}`}>
-                <Bookmark className="h-3.5 w-3.5" />{bookmarked ? "Saved" : "Bookmark"}
-              </button>
-            </div>
-            <div className="mt-3 flex max-h-16 flex-wrap items-center gap-1.5 overflow-hidden sm:max-h-none sm:gap-2">
-              {score ? <span className="rounded-md bg-[#e8621a]/90 px-2 py-0.5 font-mono text-xs font-bold text-white">{score}%</span> : null}
-              {anime.format ? <span className="rounded-md border border-white/15 bg-black/30 px-2 py-0.5 font-mono text-xs text-white/80">{formatLabel(anime.format)}</span> : null}
-              {anime.status ? <span className="rounded-md border border-white/15 bg-black/30 px-2 py-0.5 font-mono text-xs text-white/80">{formatLabel(anime.status)}</span> : null}
-              {(anime.seasonYear ?? mediaYear(anime)) ? <span className="font-mono text-xs text-white/60">{anime.seasonYear ?? mediaYear(anime)}</span> : null}
-            </div>
-            <GenreChips genres={genres} max={12} variant="hero" className="mt-3" />
-          </div>
-        </div>
 
-        <div className="relative mt-3 rounded-xl border border-white/10 bg-black/20 p-3 backdrop-blur-sm">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <h2 className="font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">Episodes</h2>
-            {currentEp ? <span className="font-mono text-[10px] text-white/45">Now playing EP {currentEp.number}</span> : null}
-          </div>
-          <div className="max-h-[148px] overflow-y-auto pr-1">
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(2.25rem,1fr))] gap-1.5">
-              {episodes.map((ep, i) => (
-                <button key={`${ep.id}-${ep.number}-${i}`} type="button" onClick={() => playEpisode(ep, category)}
-                  className={`rounded-md py-1.5 font-sans text-[12px] font-extrabold tabular-nums tracking-tight transition-colors ${currentEp?.number === ep.number ? category === "sub" ? "bg-[#e07a3a] text-black shadow-sm shadow-[#e07a3a]/30" : "bg-[#3ddc84] text-black shadow-sm shadow-[#3ddc84]/30" : watchedEpisodeNumbers.includes(ep.number) ? "border border-white/5 bg-white/10 text-white/45" : "bg-[#171a21] text-[var(--muted)] hover:bg-white/10 hover:text-white"}`}>
-                  {ep.number}
-                </button>
-              ))}
-            </div>
-            {episodes.length === 0 && <p className="py-6 text-center font-mono text-sm text-[var(--muted)]">No {category} episodes</p>}
-          </div>
-        </div>
-
-        <div className="relative z-40 mt-3 rounded-xl border border-white/10 bg-black/20 p-3 backdrop-blur-sm">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">Audio</span>
-            {(["sub", "dub"] as const).map((c) => (
-              <button key={c} type="button" onClick={() => selectCategory(c)}
-                className={cn("rounded-full px-3 py-1 font-mono text-[11px] font-bold uppercase sm:px-3.5", category === c ? c === "sub" ? "border border-[#e07a3a] bg-[#e07a3a]/15 text-[#e07a3a]" : "border border-[#3ddc84] bg-[#3ddc84]/15 text-[#3ddc84]" : "border border-white/10 bg-[#171a21] text-[var(--muted)] hover:text-white")}>
-                {c}
-              </button>
-            ))}
-          </div>
-          <PlayerToolbar prefs={prefs} onToggle={togglePref} expanded={expanded} onExpand={toggleExpandedPlayer} onPrev={goPrev} onNext={goNext} hasPrev={hasPrev} hasNext={hasNext} />
-        </div>
-      </section>
-
-      <div className="mx-auto max-w-6xl px-3 sm:px-4">
-        <section className={cn("relative mt-6", expanded && "z-[60]")}>
-          {expanded && <div className="fixed inset-0 z-50 bg-black/88" onClick={() => setExpanded(false)} role="presentation" />}
-          <div ref={playerShellRef} className={cn(dimChrome && "relative z-30", expanded && "fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-1rem)] max-w-5xl -translate-x-1/2 -translate-y-1/2 sm:w-[calc(100vw-2rem)] md:w-[calc(100vw-5rem)]")} onClick={(e) => expanded && e.stopPropagation()}>
-            {expanded && <button type="button" onClick={() => setExpanded(false)} className="absolute -top-10 right-0 flex items-center gap-1 font-mono text-xs text-white/70 hover:text-white"><X className="h-4 w-4" />Shrink</button>}
-            <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-[var(--border)] bg-black shadow-lg shadow-black/40 sm:rounded-xl">
+            {/* Player */}
+            <div
+              ref={playerShellRef}
+              className="relative aspect-video w-full overflow-hidden rounded-xl border border-[var(--border)] bg-black shadow-2xl shadow-black/50"
+            >
               {playerSourceId ? (
                 <NativeHlsPlayer
                   sourceId={playerSourceId}
@@ -608,37 +554,184 @@ function WatchPageInner() {
                   onError={setPlayerError}
                 />
               ) : (
-                <div className="flex aspect-video items-center justify-center text-sm text-[var(--muted)]">{playerError || "Select an episode"}</div>
+                <div className="flex h-full items-center justify-center font-mono text-sm text-[var(--muted)]">
+                  {playerError || "Select an episode to start"}
+                </div>
               )}
               {autoNextSecsLeft !== null && (
-                <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between gap-2 bg-black/80 px-3 py-2.5 backdrop-blur-sm sm:gap-3 sm:px-4">
-                  <span className="font-mono text-xs text-white/90">Next episode in <span className="font-bold text-[#e8621a]">{autoNextSecsLeft}s</span></span>
-                  <button type="button" onClick={(e) => { e.stopPropagation(); clearAutoNextTimers(); }} className="rounded border border-white/20 bg-white/10 px-3 py-1 font-mono text-[11px] font-semibold text-white hover:bg-white/20">Cancel</button>
+                <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between gap-2 bg-black/80 px-3 py-2.5 backdrop-blur-sm">
+                  <span className="font-mono text-xs text-white/90">
+                    Next episode in <span className="font-bold text-[#e8621a]">{autoNextSecsLeft}s</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); clearAutoNextTimers(); }}
+                    className="rounded border border-white/20 bg-white/10 px-3 py-1 font-mono text-[11px] font-semibold text-white hover:bg-white/20"
+                  >
+                    Cancel
+                  </button>
                 </div>
               )}
             </div>
-            {expanded && currentEp && <p className="mt-2 text-center font-mono text-xs text-white/70">Episode {currentEp.number}{currentEp.title ? ` — ${currentEp.title}` : ""}</p>}
-          </div>
-          {currentEp && !expanded && (
-            <p className="mt-2 font-mono text-xs text-[var(--foreground)]">
-              Episode {currentEp.number}{currentEp.title ? ` — ${currentEp.title}` : ""}
-              {resumeAt > 0 ? <span className="ml-2 text-[var(--muted)]">Resumes at {Math.floor(resumeAt / 60)}:{String(resumeAt % 60).padStart(2, "0")}</span> : null}
-            </p>
-          )}
-        </section>
 
+            {/* Now-playing label */}
+            {currentEp && (
+              <div className="mt-2 flex items-center justify-between px-0.5">
+                <p className="font-mono text-xs text-white/70">
+                  <span className="mr-1.5 rounded bg-[#e8621a]/80 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                    EP {currentEp.number}
+                  </span>
+                  {currentEp.title}
+                </p>
+                {resumeAt > 0 && (
+                  <span className="font-mono text-[10px] text-white/40">
+                    {Math.floor(resumeAt / 60)}:{String(resumeAt % 60).padStart(2, "0")}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Controls: audio + toolbar */}
+            <div className={cn(
+              "mt-3 rounded-xl border border-white/10 bg-[#0d0f14]/90 p-3",
+              dimChrome && "pointer-events-none opacity-20"
+            )}>
+              <div className="mb-2.5 flex flex-wrap items-center gap-2">
+                <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">Audio</span>
+                {(["sub", "dub"] as const).map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => selectCategory(c)}
+                    className={cn(
+                      "rounded-full px-3 py-1 font-mono text-[11px] font-bold uppercase",
+                      category === c
+                        ? c === "sub"
+                          ? "border border-[#e07a3a] bg-[#e07a3a]/15 text-[#e07a3a]"
+                          : "border border-[#3ddc84] bg-[#3ddc84]/15 text-[#3ddc84]"
+                        : "border border-white/10 bg-[#171a21] text-[var(--muted)] hover:text-white"
+                    )}
+                  >
+                    {c}
+                  </button>
+                ))}
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={toggleBookmark}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-lg border px-3 py-1.5 font-mono text-xs font-medium transition-colors",
+                    bookmarked
+                      ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]"
+                      : "border-white/20 bg-transparent text-white/60 hover:border-[var(--accent)] hover:text-white"
+                  )}
+                >
+                  <Bookmark className="h-3.5 w-3.5" />
+                  {bookmarked ? "Saved" : "Bookmark"}
+                </button>
+              </div>
+              <PlayerToolbar
+                prefs={prefs}
+                onToggle={togglePref}
+                expanded={expanded}
+                onExpand={toggleExpandedPlayer}
+                onPrev={goPrev}
+                onNext={goNext}
+                hasPrev={hasPrev}
+                hasNext={hasNext}
+              />
+            </div>
+          </div>
+
+          {/* ── Right col: anime info + episode list ── */}
+          <div className={cn(
+            "xl:shrink-0",
+            expanded ? "w-full" : "xl:w-[300px]",
+            dimChrome && "pointer-events-none opacity-20"
+          )}>
+            {/* Anime info card */}
+            <div className="relative overflow-hidden rounded-xl border border-white/10">
+              {banner && (
+                <img src={banner} alt="" className="absolute inset-0 h-full w-full object-cover opacity-20" />
+              )}
+              <div className="relative bg-gradient-to-b from-transparent via-[#0d0f14]/70 to-[#0d0f14] p-3">
+                <Link href={`/anime/${id}`} className="group block">
+                  <h1 className="font-display line-clamp-2 text-base font-bold leading-tight text-white group-hover:text-[#e8621a] sm:text-lg">
+                    {title}
+                  </h1>
+                </Link>
+                <EpisodeCountBadges subCount={epCounts.sub} dubCount={epCounts.dub} total={plannedEps} format={anime.format} className="mt-1.5" />
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {score ? <span className="rounded-md bg-[#e8621a]/90 px-2 py-0.5 font-mono text-xs font-bold text-white">{score}%</span> : null}
+                  {anime.format ? <span className="rounded-md border border-white/15 bg-black/30 px-2 py-0.5 font-mono text-xs text-white/70">{formatLabel(anime.format)}</span> : null}
+                  {anime.status ? <span className="rounded-md border border-white/15 bg-black/30 px-2 py-0.5 font-mono text-xs text-white/70">{formatLabel(anime.status)}</span> : null}
+                  {(anime.seasonYear ?? mediaYear(anime)) ? <span className="font-mono text-xs text-white/50">{anime.seasonYear ?? mediaYear(anime)}</span> : null}
+                </div>
+                <GenreChips genres={genres} max={6} variant="hero" className="mt-2" />
+              </div>
+            </div>
+
+            {/* Episode grid */}
+            <div className="mt-3 rounded-xl border border-white/10 bg-[#0d0f14]/90 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">Episodes</h2>
+                {currentEp && <span className="font-mono text-[10px] text-white/45">EP {currentEp.number}</span>}
+              </div>
+              <div className="max-h-[min(360px,40vh)] overflow-y-auto pr-0.5 xl:max-h-[min(500px,52vh)]">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(2.5rem,1fr))] gap-1.5">
+                  {episodes.map((ep, i) => (
+                    <button
+                      key={`${ep.id}-${ep.number}-${i}`}
+                      type="button"
+                      onClick={() => playEpisode(ep, category)}
+                      className={cn(
+                        "rounded-md py-1.5 font-sans text-[12px] font-extrabold tabular-nums tracking-tight transition-colors",
+                        currentEp?.number === ep.number
+                          ? category === "sub"
+                            ? "bg-[#e07a3a] text-black shadow-sm shadow-[#e07a3a]/30"
+                            : "bg-[#3ddc84] text-black shadow-sm shadow-[#3ddc84]/30"
+                          : watchedEpisodeNumbers.includes(ep.number)
+                            ? "border border-white/5 bg-white/[0.06] text-white/30"
+                            : "bg-[#171a21] text-[var(--muted)] hover:bg-white/10 hover:text-white"
+                      )}
+                    >
+                      {ep.number}
+                    </button>
+                  ))}
+                </div>
+                {episodes.length === 0 && (
+                  <p className="py-6 text-center font-mono text-sm text-[var(--muted)]">No {category} episodes</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Info section ── */}
+      <div className={cn(
+        "mx-auto mt-6 max-w-7xl px-3 sm:px-4",
+        dimChrome && "pointer-events-none opacity-20"
+      )}>
         {anime.description && (
-          <section className={cn("mt-8 transition-opacity", dimChrome && "pointer-events-none opacity-25")}>
+          <section className="mb-6">
             <h2 className="mb-2 font-mono text-xs font-semibold uppercase tracking-widest text-[var(--muted)]">About</h2>
-            <p className="text-sm leading-relaxed text-[var(--muted)]" dangerouslySetInnerHTML={{ __html: anime.description.replace(/<br\s*\/?>/gi, " ") }} />
+            <p
+              className="text-sm leading-relaxed text-[var(--muted)]"
+              dangerouslySetInnerHTML={{ __html: anime.description.replace(/<br\s*\/?>/gi, " ") }}
+            />
           </section>
         )}
         <SeasonRail seasons={seasons} currentId={id} />
-        <div className={cn("transition-opacity", dimChrome && "opacity-25")}><SimilarCarousel items={recs} /></div>
+        <SimilarCarousel items={recs} />
       </div>
 
       {dimChrome && (
-        <button type="button" onClick={exitFocus} className="fixed bottom-4 right-4 z-[70] rounded-full border border-[var(--border)] bg-black/80 px-4 py-2 font-mono text-xs font-semibold text-white shadow-lg shadow-black/40">
+        <button
+          type="button"
+          onClick={exitFocus}
+          className="fixed bottom-4 right-4 z-[70] rounded-full border border-[var(--border)] bg-black/80 px-4 py-2 font-mono text-xs font-semibold text-white shadow-lg shadow-black/40"
+        >
           Exit focus
         </button>
       )}

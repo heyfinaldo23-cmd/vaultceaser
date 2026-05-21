@@ -50,7 +50,19 @@ export default function AkSlugPage({ params }: { params: Promise<{ slug: string 
 
       setStatus("Loading episodes…");
       const epData = await akFetchEpisodeList(info.anikotoId);
-      const malId = epData?.malId;
+      let malId = epData?.malId;
+
+      // Fallback: resolve title via /api/resolve-titles (uses static catalog + Jikan)
+      if (!malId && info.title) {
+        setStatus("Resolving via title…");
+        try {
+          const res = await fetch(`/api/resolve-titles?titles=${encodeURIComponent(info.title)}`);
+          if (res.ok) {
+            const map = await res.json() as Record<string, number>;
+            malId = map[info.title] ?? null;
+          }
+        } catch { /* non-critical */ }
+      }
 
       if (malId) {
         localStorage.setItem(`${LS_PREFIX}${resolvedSlug}`, String(malId));

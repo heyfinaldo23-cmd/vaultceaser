@@ -2,9 +2,8 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import Link from "next/link";
-import { AnimeCardSkeleton } from "@/components/AnimeCard";
-import EpisodeCountBadges from "@/components/EpisodeCountBadges";
 import { useAuth } from "@/components/AuthProvider";
+import EpisodeCountBadges from "@/components/EpisodeCountBadges";
 import {
   listQualifiedLocalWatchProgress,
   type LocalWatchProgress,
@@ -58,8 +57,8 @@ function AkCard({ item, epNum }: { item: AkHomeItem | AkFilterItem; epNum?: stri
   const num = epNum ?? (item as AkHomeItem).href?.match(/\/ep-(\d+)/)?.[1];
 
   return (
-    <Link href={href} className="group block w-[130px] shrink-0">
-      <div className="relative aspect-[2/3] overflow-hidden rounded-md bg-[#1a1d28]">
+    <Link href={href} className="group block w-[160px] shrink-0">
+      <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-[#1a1d28]">
         {item.poster ? (
           <img
             src={item.poster}
@@ -74,12 +73,12 @@ function AkCard({ item, epNum }: { item: AkHomeItem | AkFilterItem; epNum?: stri
           <div className="h-full w-full bg-[#1a1d28]" />
         )}
         {num && (
-          <span className="absolute right-1 top-1 rounded bg-[#e8621a] px-1 py-0.5 font-mono text-[8px] font-bold text-white">
+          <span className="absolute right-1.5 top-1.5 rounded bg-[#e8621a] px-1.5 py-0.5 font-mono text-[9px] font-bold text-white">
             EP {num}
           </span>
         )}
       </div>
-      <h3 className="mt-1 line-clamp-2 font-mono text-[11px] font-bold leading-tight text-white group-hover:text-[#e8621a]">
+      <h3 className="mt-1.5 line-clamp-2 font-mono text-[12px] font-bold leading-tight text-white group-hover:text-[#e8621a]">
         {item.title}
       </h3>
       <EpisodeCountBadges
@@ -190,16 +189,6 @@ function HScroll({ children }: { children: React.ReactNode }) {
     >
       {children}
     </div>
-  );
-}
-
-function SkeletonRow({ count }: { count: number }) {
-  return (
-    <HScroll>
-      {Array<null>(count).fill(null).map((_, i) => (
-        <div key={i} className="w-[130px] shrink-0"><AnimeCardSkeleton /></div>
-      ))}
-    </HScroll>
   );
 }
 
@@ -359,46 +348,46 @@ export default function HomePage() {
           {anyLoading && <NekosLoadingBanner />}
 
           {/* Trending — Anikoto top anime of the day */}
-          <section>
-            <SectionHeader title="Trending" href="/browse?sort=POPULARITY_DESC" />
-            {feedLoading ? (
-              <SkeletonRow count={12} />
-            ) : akFeed?.topAnime?.length ? (
-              <HScroll>
-                {akFeed.topAnime.slice(0, 12).map((item, i) => (
-                  <AkCard key={`top-${item.slug}-${i}`} item={item} />
-                ))}
-              </HScroll>
-            ) : null}
-          </section>
+          {!feedLoading && (
+            <section>
+              <SectionHeader title="Trending" href="/browse?sort=POPULARITY_DESC" />
+              {akFeed?.topAnime?.length ? (
+                <HScroll>
+                  {akFeed.topAnime.slice(0, 12).map((item, i) => (
+                    <AkCard key={`top-${item.slug}-${i}`} item={item} />
+                  ))}
+                </HScroll>
+              ) : null}
+            </section>
+          )}
 
           {/* Latest Episodes — from /latest-updated */}
-          <section>
-            <SectionHeader title="Latest Episodes" href="/browse?sort=UPDATED_AT_DESC" />
-            {latestLoading ? (
-              <SkeletonRow count={16} />
-            ) : latestItems.length > 0 ? (
-              <HScroll>
-                {latestItems.map((item, i) => (
-                  <AkCard key={`latest-${item.slug}-${i}`} item={item} />
-                ))}
-              </HScroll>
-            ) : null}
-          </section>
+          {!latestLoading && (
+            <section>
+              <SectionHeader title="Latest Episodes" href="/browse?sort=UPDATED_AT_DESC" />
+              {latestItems.length > 0 && (
+                <HScroll>
+                  {latestItems.map((item, i) => (
+                    <AkCard key={`latest-${item.slug}-${i}`} item={item} />
+                  ))}
+                </HScroll>
+              )}
+            </section>
+          )}
 
           {/* New Releases — from /new-release */}
-          <section>
-            <SectionHeader title="New Releases" href="/browse?sort=START_DATE_DESC" />
-            {newLoading ? (
-              <SkeletonRow count={12} />
-            ) : newReleases.length > 0 ? (
-              <HScroll>
-                {newReleases.map((item, i) => (
-                  <AkCard key={`new-${item.slug}-${i}`} item={item} />
-                ))}
-              </HScroll>
-            ) : null}
-          </section>
+          {!newLoading && (
+            <section>
+              <SectionHeader title="New Releases" href="/browse?sort=START_DATE_DESC" />
+              {newReleases.length > 0 && (
+                <HScroll>
+                  {newReleases.map((item, i) => (
+                    <AkCard key={`new-${item.slug}-${i}`} item={item} />
+                  ))}
+                </HScroll>
+              )}
+            </section>
+          )}
 
           {/* A-Z Browse */}
           <section><AZBrowse /></section>
