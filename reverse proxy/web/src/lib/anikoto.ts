@@ -290,13 +290,14 @@ export function parseHomeHtml(html: string): {
 
   const spotlight = parseSpotlightItems(doc);
 
-  // "Recently Added" section — Anikoto uses #recently-added or a generic grid
+  // "Latest Episode" section (the one with sub/dub/total badges and type tag)
   const recentSection =
+    doc.querySelector("#recent-update .body") ??
     doc.querySelector("#recently-added .body") ??
     doc.querySelector("section[data-name='recently-added'] .body") ??
     doc.querySelector(".ani-block");
 
-  // "Trending" or top-anime section
+  // "Trending" section
   const trendingSection =
     doc.querySelector("#top-anime .tab-content[data-name='day']") ??
     doc.querySelector("#trending .body");

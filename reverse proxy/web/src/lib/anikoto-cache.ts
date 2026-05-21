@@ -10,8 +10,10 @@ import {
   parseWatchPage,
   parseFilterPage,
   parseSeasonsHtml,
+  parseHomeHtml,
   type AkEpisodeData,
   type AkFilterItem,
+  type AkHomeItem,
   type AkSearchResult,
   type AkSeasonEntry,
   type AkWatchInfo,
@@ -22,10 +24,12 @@ import {
 const TTL_SLUG = 7 * 24 * 60 * 60 * 1000;      // 7 days — slugs are stable
 const TTL_EP_COUNT = 6 * 60 * 60 * 1000;        // 6 hours — ep counts change often
 const TTL_SEARCH = 60 * 60 * 1000;              // 1 hour
+const TTL_HOME = 10 * 60 * 1000;                // 10 min — latest episodes change frequently
 
 const LS_SLUG_MAP = "ak:slugMap";           // malId → {slug, anikotoId, ts}
 const LS_EP_COUNT_MAP = "ak:epCountMap";    // malId → {sub, dub, ts}
 const LS_SEARCH_PREFIX = "ak:search:";      // keyword → {results[], ts}
+const LS_HOME = "ak:home";                  // {data, ts}
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
@@ -325,6 +329,30 @@ export async function akFetchSeasons(anikotoId: number): Promise<AkSeasonEntry[]
   const raw = await proxyFetch(`/api/seasons/${anikotoId}`);
   if (!raw) return [];
   return parseSeasonsHtml(raw);
+}
+
+// ─── home page ────────────────────────────────────────────────────────────────
+
+export interface AkHomeFeed {
+  spotlight: AkHomeItem[];
+  recent: AkHomeItem[];
+}
+
+/**
+ * Fetches and parses Anikoto /home.
+ * Caches for 10 minutes. Returns immediately from cache if warm.
+ */
+export async function akFetchHome(): Promise<AkHomeFeed> {
+  const cached = lsGet<{ data: AkHomeFeed; ts: number }>(LS_HOME);
+  if (cached && Date.now() - cached.ts < TTL_HOME) return cached.data;
+
+  const raw = await proxyFetch("/home");
+  if (!raw) return { spotlight: [], recent: [] };
+
+  const { spotlight, recent } = parseHomeHtml(raw);
+  const data: AkHomeFeed = { spotlight, recent };
+  lsSet(LS_HOME, { data, ts: Date.now() });
+  return data;
 }
 
 

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import AnimeCard, { AnimeCardSkeleton } from "@/components/AnimeCard";
+import EpisodeCountBadges from "@/components/EpisodeCountBadges";
 import { api, type AnimeMedia } from "@/lib/api";
 import { filterAnimeList } from "@/lib/anime-filters";
 import { clientApi } from "@/lib/client-api";
@@ -12,6 +13,85 @@ import {
   listQualifiedLocalWatchProgress,
   type LocalWatchProgress,
 } from "@/lib/watch-progress";
+import { akFetchHome, setCachedEpCounts, type AkHomeFeed } from "@/lib/anikoto-cache";
+import type { AkHomeItem } from "@/lib/anikoto";
+
+// ─── nekos.best loading gif ───────────────────────────────────────────────────
+
+const NEKOS_CATEGORIES = ["nod", "wave", "think", "happy", "smile", "bored", "lurk"];
+
+function NekosLoadingBanner({ visible }: { visible: boolean }) {
+  const [gifUrl, setGifUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    const cat = NEKOS_CATEGORIES[Math.floor(Math.random() * NEKOS_CATEGORIES.length)];
+    fetch(`https://nekos.best/api/v2/${cat}?amount=1`)
+      .then((r) => r.json())
+      .then((d) => {
+        const url = d?.results?.[0]?.url as string | undefined;
+        if (url) setGifUrl(url);
+      })
+      .catch(() => null);
+  }, [visible]);
+
+  if (!visible) return null;
+
+  return (
+    <div className="flex items-center justify-center gap-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-5">
+      {gifUrl ? (
+        <img src={gifUrl} alt="loading..." className="h-20 w-20 rounded-lg object-cover" />
+      ) : (
+        <div className="h-20 w-20 rounded-lg skeleton" />
+      )}
+      <div className="space-y-1">
+        <p className="font-mono text-sm font-semibold text-white">Fetching latest anime…</p>
+        <p className="font-mono text-xs text-[var(--muted)]">Grabbing fresh data from Anikoto</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Anikoto latest episode card ─────────────────────────────────────────────
+
+function AkHomeCard({ item, malId }: { item: AkHomeItem; malId?: number }) {
+  const href = malId ? `/anime/${malId}` : `/browse?keyword=${encodeURIComponent(item.title)}`;
+  const epNum = item.href.match(/\/ep-(\d+)/)?.[1];
+
+  return (
+    <Link href={href} className="group block w-[130px] shrink-0">
+      <div className="relative aspect-[2/3] overflow-hidden rounded-md bg-[#1a1d28]">
+        {item.poster ? (
+          <img
+            src={item.poster}
+            alt={item.title}
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+            loading="lazy"
+            onError={(e) => { (e.target as HTMLImageElement).src = "/placeholder.svg"; }}
+          />
+        ) : (
+          <div className="h-full w-full bg-[#1a1d28]" />
+        )}
+        {epNum && (
+          <span className="absolute right-1 top-1 rounded bg-[#e8621a] px-1 py-0.5 font-mono text-[8px] font-bold text-white">
+            EP {epNum}
+          </span>
+        )}
+      </div>
+      <h3 className="mt-1 line-clamp-2 font-mono text-[11px] font-medium leading-tight text-white group-hover:text-[#e8621a]">
+        {item.title}
+      </h3>
+      <EpisodeCountBadges
+        subCount={item.subCount}
+        dubCount={item.dubCount}
+        total={item.totalCount ?? undefined}
+        format={item.type || "TV"}
+        size="compact"
+        className="mt-0.5"
+      />
+    </Link>
+  );
+}
 
 // ─── cute grill sidebar ───────────────────────────────────────────────────────
 
@@ -428,7 +508,7 @@ function formatResumeTime(seconds?: number | null) {
 
 // ─── Home feed session cache ──────────────────────────────────────────────
 
-const HOME_CACHE_KEY = "home-feed-v2";
+const HOME_CACHE_KEY = "home-feed-v3";
 
 type HomeFeedCache = {
   trending: AnimeMedia[];
@@ -474,14 +554,41 @@ export default function HomePage() {
   const [recentlyCompleted, setRecentlyCompleted] = useState<AnimeMedia[]>([]);
   const [continueList, setContinueList] = useState<ContinueItem[]>([]);
 
+  // Anikoto home feed (latest episodes with real sub/dub/total counts)
+  const [akFeed, setAkFeed] = useState<AkHomeFeed | null>(null);
+  const [akLoading, setAkLoading] = useState(true);
+  // title → malId map resolved from /api/resolve-titles
+  const [akMalMap, setAkMalMap] = useState<Record<string, number>>({});
+
   const allIds = useMemo(
     () => [...new Set([...trending, ...fresh, ...latestReleases, ...recentlyCompleted].map((a) => a.id))],
     [trending, fresh, latestReleases, recentlyCompleted]
   );
   const epCounts = useEpisodeCountsMap(allIds);
 
+  // Resolve Anikoto titles → MAL IDs and seed ep count cache
+  const resolveAndCache = useCallback(async (items: AkHomeItem[]) => {
+    if (!items.length) return;
+    const titles = [...new Set(items.map((i) => i.title).filter(Boolean))];
+    try {
+      const params = new URLSearchParams({ titles: titles.join("|") });
+      const res = await fetch(`/api/resolve-titles?${params}`);
+      if (!res.ok) return;
+      const map = await res.json() as Record<string, number>;
+      setAkMalMap(map);
+      // Seed ep count cache so badges populate immediately for resolved anime
+      for (const item of items) {
+        const malId = map[item.title];
+        if (malId && (item.subCount > 0 || item.dubCount > 0)) {
+          setCachedEpCounts(malId, item.subCount, item.dubCount);
+        }
+      }
+      // Notify useEpisodeCountsMap listeners
+      window.dispatchEvent(new StorageEvent("storage", { key: "ak:epCountMap" }));
+    } catch { /* non-critical */ }
+  }, []);
+
   useEffect(() => {
-    // Hydrate from cache immediately so returning visitors see content instantly
     const cached = readFeedCache();
     if (cached) {
       setTrending(cached.trending);
@@ -491,7 +598,7 @@ export default function HomePage() {
       setLoading(false);
     }
 
-    // Always fetch fresh in background — updates cache if anything changed
+    // Fetch AniList data
     (async () => {
       try {
         const [trendRes, freshRes, latestRes, completedRes] = await Promise.allSettled([
@@ -525,7 +632,18 @@ export default function HomePage() {
         setLoading(false);
       }
     })();
-  }, [user]);
+
+    // Fetch Anikoto home in parallel — latest episodes with real ep counts
+    (async () => {
+      try {
+        const feed = await akFetchHome();
+        setAkFeed(feed);
+        await resolveAndCache(feed.recent);
+      } catch { /* non-critical */ } finally {
+        setAkLoading(false);
+      }
+    })();
+  }, [user, resolveAndCache]);
 
   return (
     <div className="mx-auto max-w-[1520px] px-3 py-5 sm:px-4 sm:py-6">
@@ -570,6 +688,27 @@ export default function HomePage() {
           </div>
         </section>
       )}
+
+      {/* Loading banner — shows nekos.best gif while data is coming in */}
+      {loading && akLoading && <NekosLoadingBanner visible={loading && akLoading} />}
+
+      {/* Anikoto Latest Episodes — real-time sub/dub counts from Anikoto /home */}
+      <section>
+        <SectionHeader title="Latest Episodes" href="/browse?sort=UPDATED_AT_DESC" label="Browse all" />
+        {akLoading ? (
+          <HScroll>
+            {Array<null>(16).fill(null).map((_, i) => (
+              <div key={i} className="w-[130px] shrink-0"><AnimeCardSkeleton /></div>
+            ))}
+          </HScroll>
+        ) : akFeed?.recent && akFeed.recent.length > 0 ? (
+          <HScroll>
+            {akFeed.recent.map((item, i) => (
+              <AkHomeCard key={`${item.slug}-${i}`} item={item} malId={akMalMap[item.title]} />
+            ))}
+          </HScroll>
+        ) : null}
+      </section>
 
       {/* Trending */}
       <section>
