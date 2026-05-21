@@ -1,80 +1,94 @@
-# SaturdayNight Setup
+# SaturdayNight Deployment Setup
 
-This project has two deploy targets:
+Two things deploy separately:
 
-- FastAPI backend on your VPS.
-- Next.js web app on Vercel, using Supabase Postgres for user data.
+- `reverse proxy/` — FastAPI backend on the VPS.
+- `reverse proxy/web/` — Next.js app on Vercel, with Supabase Postgres for user data.
 
-## 1. Backend VPS
+## 1. VPS Backend
 
-Copy the repo to your server and run the backend from:
+Run the API from the `reverse proxy` folder:
 
-```bash
-cd "reverse proxy"
-pip install -r ../requirements.txt
+```powershell
+cd "C:\Users\Administrator\Documents\reverse proxy"
+py -m pip install -r ..\requirements.txt
 py server.py
 ```
 
-Expected backend URL:
+For dev reload:
+
+```powershell
+py server.py --reload
+```
+
+Expected public API:
 
 ```text
 http://37.114.37.107:8080
 ```
 
-Make sure your firewall allows port `8080`.
-
-The backend creates a persistent cache at:
+Open port `8080` in the VPS firewall/security group. The backend writes its provider cache to:
 
 ```text
 reverse proxy/data/provider_cache.sqlite
 ```
 
-Do not delete this file unless you want the homepage and episode counts to cold-start slowly again.
+Keep that file. Deleting it makes homepage badges, episode counts, and provider lookups cold-start like molasses.
+
+For production, run `py server.py` under a process manager (`nssm`, Windows Task Scheduler, PM2, systemd on Linux, etc.) so it restarts after crashes/reboots.
 
 ## 2. Supabase
 
-Create a Supabase project, then open the SQL editor and run:
+Create a Supabase project, then run this file in Supabase SQL Editor:
 
 ```text
 reverse proxy/web/supabase/schema.sql
 ```
 
-Then copy the Supabase Postgres **Transaction Pooler** connection string.
-
-It should look like:
+Use the Supabase **Transaction Pooler** connection string for Vercel/serverless:
 
 ```text
 postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-region.pooler.supabase.com:6543/postgres
 ```
 
-Use this as `DATABASE_URL` in Vercel.
+Put that full URL in `DATABASE_URL`.
+
+Do not use local SQLite for Vercel. Do not expose the Supabase service-role key in the frontend. The app only needs the Postgres connection string server-side.
 
 ## 3. Vercel
 
-Import the GitHub repo into Vercel.
-
-Set the root directory to:
+Import the GitHub repo into Vercel and set:
 
 ```text
-reverse proxy/web
+Root Directory: reverse proxy/web
+Build Command: npm run build
+Install Command: npm install
+Output Directory: .next
 ```
 
-Set environment variables:
+Environment variables:
 
 ```env
 BACKEND_URL=http://37.114.37.107:8080
 NEXT_PUBLIC_BACKEND_URL=http://37.114.37.107:8080
-DATABASE_URL=your_supabase_transaction_pooler_url
-SESSION_SECRET=replace_with_32_plus_random_chars
+DATABASE_URL=postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-region.pooler.supabase.com:6543/postgres
+SESSION_SECRET=generate_32_plus_random_chars
 ```
 
-Then deploy.
+Generate a session secret:
+
+```bash
+openssl rand -hex 32
+```
+
+`BACKEND_URL` is used by Next server routes. `NEXT_PUBLIC_BACKEND_URL` is used when browser-visible URLs need to know the backend origin.
 
 ## 4. Smoke Tests
 
 Backend:
 
 ```text
+http://37.114.37.107:8080/api/health
 http://37.114.37.107:8080/api/trending?page=1&per_page=12
 http://37.114.37.107:8080/api/episode-counts?ids=21,59551,63276
 ```
@@ -83,11 +97,22 @@ Web:
 
 - Open the Vercel URL.
 - Search an anime.
-- Open a watch page.
+- Open `/anime/{mal_id}/watch?ep=1&cat=sub`.
 - Register/login with a 16-digit account code.
 - Add a bookmark.
-- Confirm continue watching saves.
+- Confirm continue watching saves after watching at least a little.
+- Confirm the browser-facing stream route returns JSON:
 
-## Notes
+```text
+https://YOUR_VERCEL_DOMAIN/api/mp/stream/getSources?id=mal%3A62568%3A2&category=sub
+```
 
-Keep secrets out of git. Do not commit `.env`, database files, GitHub tokens, or Supabase passwords.
+## 5. Updating Deployments
+
+Backend changes do not deploy through Vercel. Copy/pull the repo on the VPS, then restart `server.py`.
+
+Frontend changes deploy through Vercel after pushing to GitHub.
+
+## Security Notes
+
+Keep secrets out of git and chat. Never commit `.env`, database files, GitHub tokens, Supabase passwords, or service-role keys.

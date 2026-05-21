@@ -61,7 +61,12 @@ export async function GET(request: Request) {
     // Replace absolute backend URLs with the same-origin URL so HLS.js
     // fetches segment/variant requests through Next.js proxy, not cross-origin.
     const requestOrigin = url.origin;
-    const rewritten = text.replaceAll(BACKEND_ORIGIN, requestOrigin);
+    const rewritten = text
+      .replaceAll(BACKEND_ORIGIN, requestOrigin)
+      .replaceAll("http://0.0.0.0:3456", requestOrigin)
+      .replaceAll("http://127.0.0.1:8080", requestOrigin)
+      .replaceAll("http://localhost:8080", requestOrigin)
+      .replace(/https?:\/\/(?:0\.0\.0\.0|127\.0\.0\.1|localhost)(?::\d+)?\/api\//g, "/api/");
 
     return new Response(rewritten, {
       status: res.status,

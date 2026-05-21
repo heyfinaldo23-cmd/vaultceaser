@@ -1,6 +1,6 @@
-# VaultCeaser
+# SaturdayNight / VaultCeaser
 
-FastAPI backend plus a Next.js web app for browsing anime and playing streams. Episode metadata and stream resolution go through Miruro-style **pipe** APIs; playback can use **vidwish.live**’s upstream player (same pattern as the HAR captures in `research/`).
+FastAPI backend plus a Next.js web app for browsing anime and playing streams. The backend resolves metadata/provider data, caches expensive lookups, and proxies HLS safely. The web app is designed for Vercel + Supabase.
 
 ## Quick start
 
@@ -8,14 +8,32 @@ While the server runs: OpenAPI + try-it at **`/docs`**, human-readable reference
 
 ```bash
 # Backend (default http://0.0.0.0:8080)
-pip install -r requirements.txt
-python server.py
+cd "reverse proxy"
+pip install -r ../requirements.txt
+py server.py
 ```
 
 ```bash
-# Web UI — point it at the API (default matches server)
+# Web UI
 cd web && npm install && npm run dev
-# Set NEXT_PUBLIC_API_URL if the API is not on http://localhost:8080
+# Set BACKEND_URL/NEXT_PUBLIC_BACKEND_URL if the API is not local
+```
+
+Full deployment guide: [`setup/README.md`](setup/README.md).
+
+## Production Shape
+
+- VPS backend: run `reverse proxy/server.py` and expose `http://YOUR_SERVER:8080`.
+- Vercel frontend: deploy `reverse proxy/web`.
+- Supabase: run `reverse proxy/web/supabase/schema.sql`, then set the Transaction Pooler URL as `DATABASE_URL`.
+
+Required Vercel env:
+
+```env
+BACKEND_URL=http://37.114.37.107:8080
+NEXT_PUBLIC_BACKEND_URL=http://37.114.37.107:8080
+DATABASE_URL=postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-region.pooler.supabase.com:6543/postgres
+SESSION_SECRET=generate_32_plus_random_chars
 ```
 
 Watch page in the **server** (embedded list + iframe): `http://localhost:8080/watch/{anilistId}`  

@@ -44,16 +44,16 @@ function Btn({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "flex min-w-0 items-center justify-center gap-1.5 rounded-lg border px-2.5 py-2 font-mono text-[11px] font-semibold transition-colors sm:gap-2 sm:px-3 sm:text-xs",
+        "flex min-w-0 items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 font-mono text-[10px] font-semibold transition-colors sm:px-3 sm:text-[11px]",
         disabled && "cursor-not-allowed opacity-40",
         active
-          ? "border-[#e8621a] bg-[#e8621a]/20 text-[#e8621a]"
+          ? "border-[#e8621a]/70 bg-[#e8621a]/15 text-[#e8621a]"
           : accent
-            ? "border-[#e8621a]/50 bg-[#1a1d24] text-[#e8621a] hover:bg-[#e8621a]/10"
-            : "border-[var(--border)] bg-[#1a1d24] text-[var(--foreground)] hover:border-[var(--muted)]"
+            ? "border-[#e8621a]/40 bg-[#171a21] text-[#e8621a] hover:bg-[#e8621a]/10"
+            : "border-white/10 bg-[#171a21] text-[var(--foreground)] hover:border-white/20 hover:bg-white/5"
       )}
     >
-      <Icon className="h-4 w-4 shrink-0" />
+      <Icon className="h-3.5 w-3.5 shrink-0" />
       {label}
     </button>
   );
@@ -71,13 +71,13 @@ export default function PlayerToolbar({
 }: Props) {
   return (
     <div
-      className="relative -mt-1 rounded-xl border border-[var(--border)] bg-[#12141a] p-4 shadow-lg shadow-black/30"
+      className="relative rounded-lg border border-white/10 bg-[#10131a]/85 p-2.5 shadow-lg shadow-black/20"
       aria-label="Player settings"
     >
       <p className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">
         Player
       </p>
-      <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+      <div className="grid grid-cols-2 gap-1.5 sm:flex sm:flex-wrap sm:items-center">
         <Btn
           icon={Maximize2}
           label={expanded ? "Shrink" : "Expand"}
@@ -108,7 +108,7 @@ export default function PlayerToolbar({
           active={prefs.autoSkip}
           onClick={() => onToggle("autoSkip")}
         />
-        <span className="mx-0.5 hidden h-8 w-px bg-[var(--border)] sm:block" />
+        <span className="mx-0.5 hidden h-7 w-px bg-white/10 sm:block" />
         <Btn icon={SkipBack} label="Prev" onClick={onPrev} disabled={!hasPrev} />
         <Btn icon={SkipForward} label="Next" onClick={onNext} disabled={!hasNext} />
       </div>

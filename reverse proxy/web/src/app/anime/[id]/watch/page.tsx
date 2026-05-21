@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Bookmark, X } from "lucide-react";
 import GenreChips from "@/components/GenreChips";
 import EpisodeCountBadges from "@/components/EpisodeCountBadges";
+import NativeHlsPlayer, { type NativePlayerProgress } from "@/components/NativeHlsPlayer";
 import PlayerToolbar from "@/components/PlayerToolbar";
 import SeasonRail, { type SeasonEntry } from "@/components/SeasonRail";
 import SimilarCarousel from "@/components/SimilarCarousel";
@@ -46,7 +47,7 @@ function WatchPageInner() {
   );
   const categoryRef = useRef<"sub" | "dub">(category);
   const [currentEp, setCurrentEp] = useState<EpisodeData | null>(null);
-  const [iframeSrc, setIframeSrc] = useState("");
+  const [playerSourceId, setPlayerSourceId] = useState("");
   const [playerError, setPlayerError] = useState("");
   const [bookmarked, setBookmarked] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -65,7 +66,6 @@ function WatchPageInner() {
   const animeRef = useRef<AnimeMedia | null>(null);
   const prefsRef = useRef<PlayerPrefs>(prefs);
   const userRef = useRef(user);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const playerShellRef = useRef<HTMLDivElement>(null);
   const lastPlayerTimeRef = useRef(0);
   const lastPlayerRawTimeRef = useRef(0);
@@ -158,7 +158,7 @@ function WatchPageInner() {
     clearAutoNextTimers();
     setCurrentEp(ep);
     setPlayerError("");
-    setIframeSrc("");
+    setPlayerSourceId("");
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href);
       url.searchParams.set("ep", String(ep.number));
@@ -178,11 +178,7 @@ function WatchPageInner() {
     lastSyncedProgressRef.current = "";
     playerCanReportRef.current = false;
 
-    // Direct iframe URL. Do not force autoplay; upstream autoplay starts muted in browsers.
-    const src = new URL(`/api/mp/stream/mal/${id}/${ep.number}/${streamCategory}`, window.location.origin);
-    src.searchParams.set("autostart", "false");
-    if (storedPosition > 0) src.searchParams.set("t", String(storedPosition));
-    setIframeSrc(`${src.pathname}${src.search}`);
+    setPlayerSourceId(`mal:${id}:${ep.number}`);
   }, [clearAutoNextTimers, id]);
 
   const selectCategory = useCallback((nextCategory: "sub" | "dub") => {
@@ -194,7 +190,7 @@ function WatchPageInner() {
     setEpisodes(list);
     setExpanded(false);
     if (nextEpisode) { void playEpisode(nextEpisode, nextCategory); }
-    else { setCurrentEp(null); setIframeSrc(""); setPlayerError(""); }
+    else { setCurrentEp(null); setPlayerSourceId(""); setPlayerError(""); }
   }, [category, currentEp, megaplayEps, playEpisode]);
 
   const load = useCallback(async () => {
@@ -364,6 +360,8 @@ function WatchPageInner() {
   }, [playEpisode]);
   const goNextRef = useRef(goNext);
   useEffect(() => { goNextRef.current = goNext; }, [goNext]);
+  const hasNextRef = useRef(hasNext);
+  useEffect(() => { hasNextRef.current = hasNext; }, [hasNext]);
 
   const toggleExpandedPlayer = useCallback(() => {
     if (expanded) {
@@ -384,74 +382,51 @@ function WatchPageInner() {
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
 
-  useEffect(() => {
-    if (!currentEp || !iframeSrc) return;
-    const onMessage = (event: MessageEvent) => {
-      if (iframeRef.current?.contentWindow && event.source !== iframeRef.current.contentWindow) return;
-      let data = event.data as {
-        type?: string;
-        event?: string;
-        channel?: string;
-        currentTime?: number;
-        time?: number;
-        duration?: number;
-        message?: string;
-      } | string | undefined;
-      if (typeof data === "string") {
-        try { data = JSON.parse(data); } catch { return; }
-      }
-      if (!data || typeof data !== "object") return;
+  const handlePlayerReady = useCallback((data: NativePlayerProgress) => {
+    playerCanReportRef.current = true;
+    clearAutoNextTimers();
+    const rawPosition = Math.max(0, Number(data.currentTime || 0) || 0);
+    const duration = data.duration && Number.isFinite(data.duration) && data.duration > 0 ? Math.floor(data.duration) : null;
+    lastTickAtRef.current = Date.now();
+    lastPlayerTimeRef.current = Math.floor(rawPosition);
+    lastPlayerRawTimeRef.current = rawPosition;
+    if (duration != null) { playerDurationSecondsRef.current = duration; setPlayerDurationSeconds(duration); }
+  }, [clearAutoNextTimers]);
 
-      const type = String(data.type || "");
-      const eventName = String(data.event || "");
-      const isVaultEvent = type.startsWith("vaultceaser:");
-      const isMegaPlayProgress = eventName === "time" || type === "watching-log";
-      const isMegaPlayComplete = eventName === "complete";
-      const isMegaPlayError = eventName === "error";
+  const handlePlayerProgress = useCallback((data: NativePlayerProgress) => {
+    playerCanReportRef.current = true;
+    clearAutoNextTimers();
+    const rawPosition = Math.max(0, Number(data.currentTime || 0) || 0);
+    const position = Math.floor(rawPosition);
+    const duration = data.duration && Number.isFinite(data.duration) && data.duration > 0 ? Math.floor(data.duration) : null;
+    const now = Date.now();
+    let nextWatchedSeconds = watchedSecondsRef.current;
+    if (lastTickAtRef.current && rawPosition > lastPlayerRawTimeRef.current) {
+      const deltaWall = Math.max(0, Math.min(5, (now - lastTickAtRef.current) / 1000));
+      const deltaVideo = Math.max(0, Math.min(5, rawPosition - lastPlayerRawTimeRef.current));
+      watchedRemainderRef.current += Math.min(deltaWall || deltaVideo, deltaVideo || deltaWall);
+      const wholeSeconds = Math.floor(watchedRemainderRef.current);
+      if (wholeSeconds > 0) { nextWatchedSeconds += wholeSeconds; watchedRemainderRef.current -= wholeSeconds; }
+    }
+    lastTickAtRef.current = now;
+    lastPlayerTimeRef.current = position;
+    lastPlayerRawTimeRef.current = rawPosition;
+    setResumeAt(position);
+    persistProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: nextWatchedSeconds });
+    syncQualifiedProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: nextWatchedSeconds });
+  }, [clearAutoNextTimers, persistProgress, syncQualifiedProgress]);
 
-      if (isMegaPlayError || type === "vaultceaser:player-error") {
-        setPlayerError(data.message || "Could not load player");
-        return;
-      }
-
-      if (isMegaPlayProgress || ["vaultceaser:player-ready","vaultceaser:player-resumed","vaultceaser:timeupdate","vaultceaser:player-skipped"].includes(type)) {
-        playerCanReportRef.current = true;
-        clearAutoNextTimers();
-        const rawPosition = Math.max(0, Number(data.currentTime ?? data.time ?? 0) || 0);
-        const position = Math.floor(rawPosition);
-        const duration = data.duration && Number.isFinite(data.duration) && data.duration > 0 ? Math.floor(data.duration) : null;
-        const now = Date.now();
-        let nextWatchedSeconds = watchedSecondsRef.current;
-        if ((isMegaPlayProgress || type === "vaultceaser:timeupdate") && lastTickAtRef.current && rawPosition > lastPlayerRawTimeRef.current) {
-          const deltaWall = Math.max(0, Math.min(5, (now - lastTickAtRef.current) / 1000));
-          const deltaVideo = Math.max(0, Math.min(5, rawPosition - lastPlayerRawTimeRef.current));
-          watchedRemainderRef.current += Math.min(deltaWall || deltaVideo, deltaVideo || deltaWall);
-          const wholeSeconds = Math.floor(watchedRemainderRef.current);
-          if (wholeSeconds > 0) { nextWatchedSeconds += wholeSeconds; watchedRemainderRef.current -= wholeSeconds; }
-        }
-        lastTickAtRef.current = now;
-        lastPlayerTimeRef.current = position;
-        lastPlayerRawTimeRef.current = rawPosition;
-        setResumeAt(position);
-        persistProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: nextWatchedSeconds });
-        syncQualifiedProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: nextWatchedSeconds });
-        return;
-      }
-      if (isMegaPlayComplete || type === "vaultceaser:episode-ended") {
-        const duration = playerDurationSecondsRef.current;
-        const position = duration && duration > 0 ? Math.max(0, duration - 1) : lastPlayerTimeRef.current;
-        persistProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: Math.max(watchedSecondsRef.current, 60), force: true });
-        syncQualifiedProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: Math.max(watchedSecondsRef.current, 60), force: true });
-        if (prefsRef.current.autoNext && hasNext) goNextRef.current();
-      }
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [clearAutoNextTimers, currentEp, hasNext, iframeSrc, persistProgress, syncQualifiedProgress]);
+  const handlePlayerEnded = useCallback(() => {
+    const duration = playerDurationSecondsRef.current;
+    const position = duration && duration > 0 ? Math.max(0, duration - 1) : lastPlayerTimeRef.current;
+    persistProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: Math.max(watchedSecondsRef.current, 60), force: true });
+    syncQualifiedProgress({ positionSeconds: position, durationSeconds: duration, watchedSeconds: Math.max(watchedSecondsRef.current, 60), force: true });
+    if (prefsRef.current.autoNext && hasNextRef.current) goNextRef.current();
+  }, [persistProgress, syncQualifiedProgress]);
 
   useEffect(() => {
     clearAutoNextTimers();
-    if (!iframeSrc || !currentEp || !prefs.autoNext || !hasNext || playerCanReportRef.current) return;
+    if (!playerSourceId || !currentEp || !prefs.autoNext || !hasNext || playerCanReportRef.current) return;
     const COUNTDOWN_SECS = 30;
     const durationRaw = anime?.duration;
     const episodeMins = typeof durationRaw === "number" ? durationRaw : parseInt(String(durationRaw ?? "24")) || 24;
@@ -467,17 +442,17 @@ function WatchPageInner() {
     }, delaySecs * 1000);
     return clearAutoNextTimers;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [iframeSrc, currentEp?.number, hasNext, prefs.autoNext, resumeAt, anime?.duration, clearAutoNextTimers]);
+  }, [playerSourceId, currentEp?.number, hasNext, prefs.autoNext, resumeAt, anime?.duration, clearAutoNextTimers]);
 
   useEffect(() => {
-    if (!iframeSrc || !currentEp) return;
+    if (!playerSourceId || !currentEp) return;
     const save = () => { persistProgress({ force: true }); };
     window.addEventListener("pagehide", save);
     window.addEventListener("beforeunload", save);
     return () => { window.removeEventListener("pagehide", save); window.removeEventListener("beforeunload", save); };
-  }, [currentEp, iframeSrc, persistProgress]);
+  }, [currentEp, playerSourceId, persistProgress]);
 
-  const dimChrome = prefs.focus && !!iframeSrc && !expanded;
+  const dimChrome = prefs.focus && !!playerSourceId && !expanded;
   const exitFocus = useCallback(() => { setPrefs((prev) => savePlayerPrefs({ ...prev, focus: false })); }, []);
   useEffect(() => {
     if (!dimChrome) return;
@@ -497,12 +472,13 @@ function WatchPageInner() {
 
   return (
     <div className="pb-10">
-      <section className={cn("relative mx-auto max-w-6xl overflow-hidden rounded-b-2xl border border-t-0 border-[var(--border)] px-3 pt-2 transition-opacity sm:px-4", dimChrome && "opacity-25")}>
-        <div className="relative aspect-[16/10] min-h-[230px] max-h-[340px] w-full overflow-hidden rounded-xl bg-[var(--card)] sm:aspect-[21/9] sm:min-h-[200px]">
+      <section className={cn("relative mx-auto mt-3 max-w-6xl overflow-hidden rounded-2xl border border-white/10 bg-[#0d0f14]/88 p-2 shadow-2xl shadow-black/30 transition-opacity sm:p-3", dimChrome && "opacity-25")}>
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(224,122,58,0.14),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.04),transparent_45%)]" />
+        <div className="relative aspect-[16/9] min-h-[190px] max-h-[300px] w-full overflow-hidden rounded-xl bg-[var(--card)] sm:aspect-[21/8] sm:min-h-[185px]">
           {banner ? <img src={banner} alt="" className="h-full w-full object-cover" /> : null}
           <div className="absolute inset-0 bg-gradient-to-t from-[#0a0b0d] via-[#0a0b0d]/70 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-r from-[#0a0b0d]/80 via-transparent to-transparent" />
-          <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-6">
+          <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-5">
             <nav className="mb-2 font-mono text-[10px] uppercase tracking-widest text-white/50">
               <Link href="/" className="hover:text-[var(--accent)]">Home</Link>
               <span className="mx-1.5">/</span>
@@ -512,7 +488,7 @@ function WatchPageInner() {
             </nav>
             <div className="flex flex-wrap items-end justify-between gap-2 sm:gap-3">
               <div className="min-w-0 flex-1">
-                <h1 className="font-display text-xl font-bold tracking-tight text-white sm:text-3xl md:text-4xl">{title}</h1>
+                <h1 className="font-display text-xl font-bold tracking-tight text-white sm:text-3xl md:text-[2.35rem]">{title}</h1>
                 <EpisodeCountBadges subCount={epCounts.sub} dubCount={epCounts.dub} total={plannedEps} format={anime.format} className="mt-2" />
               </div>
               <button type="button" onClick={toggleBookmark} className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 font-mono text-xs font-medium backdrop-blur-md transition-colors ${bookmarked ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]" : "border-white/20 bg-black/40 text-white hover:border-[var(--accent)]"}`}>
@@ -529,13 +505,16 @@ function WatchPageInner() {
           </div>
         </div>
 
-        <div className="mt-5 border-t border-[var(--border)] pt-5">
-          <h2 className="mb-3 font-mono text-xs font-semibold uppercase tracking-widest text-[var(--muted)]">Episodes</h2>
-          <div className="max-h-[240px] overflow-y-auto rounded-xl border border-[var(--border)] bg-[#12141a] p-2 sm:p-3">
-            <div className="grid grid-cols-5 gap-1.5 min-[380px]:grid-cols-6 sm:grid-cols-8 md:grid-cols-10 lg:grid-cols-12">
+        <div className="relative mt-3 rounded-xl border border-white/10 bg-black/20 p-3 backdrop-blur-sm">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <h2 className="font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">Episodes</h2>
+            {currentEp ? <span className="font-mono text-[10px] text-white/45">Now playing EP {currentEp.number}</span> : null}
+          </div>
+          <div className="max-h-[148px] overflow-y-auto pr-1">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(2.25rem,1fr))] gap-1.5">
               {episodes.map((ep, i) => (
                 <button key={`${ep.id}-${ep.number}-${i}`} type="button" onClick={() => playEpisode(ep, category)}
-                  className={`rounded-md py-1.5 font-sans text-[12px] font-extrabold tabular-nums tracking-tight ${currentEp?.number === ep.number ? category === "sub" ? "bg-[#e07a3a] text-black shadow-sm shadow-[#e07a3a]/30" : "bg-[#3ddc84] text-black shadow-sm shadow-[#3ddc84]/30" : watchedEpisodeNumbers.includes(ep.number) ? "border border-white/5 bg-[#272a33] text-white/45" : "bg-[#1a1d24] text-[var(--muted)] hover:text-white"}`}>
+                  className={`rounded-md py-1.5 font-sans text-[12px] font-extrabold tabular-nums tracking-tight transition-colors ${currentEp?.number === ep.number ? category === "sub" ? "bg-[#e07a3a] text-black shadow-sm shadow-[#e07a3a]/30" : "bg-[#3ddc84] text-black shadow-sm shadow-[#3ddc84]/30" : watchedEpisodeNumbers.includes(ep.number) ? "border border-white/5 bg-white/10 text-white/45" : "bg-[#171a21] text-[var(--muted)] hover:bg-white/10 hover:text-white"}`}>
                   {ep.number}
                 </button>
               ))}
@@ -544,12 +523,12 @@ function WatchPageInner() {
           </div>
         </div>
 
-        <div className="relative z-40 mt-5 space-y-3 border-t border-[var(--border)] pt-5">
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="relative z-40 mt-3 rounded-xl border border-white/10 bg-black/20 p-3 backdrop-blur-sm">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
             <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">Audio</span>
             {(["sub", "dub"] as const).map((c) => (
               <button key={c} type="button" onClick={() => selectCategory(c)}
-                className={cn("rounded-full px-3 py-1.5 font-mono text-xs font-bold uppercase sm:px-4", category === c ? c === "sub" ? "border border-[#e07a3a] bg-[#e07a3a]/20 text-[#e07a3a]" : "border border-[#3ddc84] bg-[#3ddc84]/20 text-[#3ddc84]" : "border border-[var(--border)] bg-[#1a1d24] text-[var(--muted)] hover:text-white")}>
+                className={cn("rounded-full px-3 py-1 font-mono text-[11px] font-bold uppercase sm:px-3.5", category === c ? c === "sub" ? "border border-[#e07a3a] bg-[#e07a3a]/15 text-[#e07a3a]" : "border border-[#3ddc84] bg-[#3ddc84]/15 text-[#3ddc84]" : "border border-white/10 bg-[#171a21] text-[var(--muted)] hover:text-white")}>
                 {c}
               </button>
             ))}
@@ -564,10 +543,18 @@ function WatchPageInner() {
           <div ref={playerShellRef} className={cn(dimChrome && "relative z-30", expanded && "fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-1rem)] max-w-5xl -translate-x-1/2 -translate-y-1/2 sm:w-[calc(100vw-2rem)] md:w-[calc(100vw-5rem)]")} onClick={(e) => expanded && e.stopPropagation()}>
             {expanded && <button type="button" onClick={() => setExpanded(false)} className="absolute -top-10 right-0 flex items-center gap-1 font-mono text-xs text-white/70 hover:text-white"><X className="h-4 w-4" />Shrink</button>}
             <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-[var(--border)] bg-black shadow-lg shadow-black/40 sm:rounded-xl">
-              {iframeSrc ? (
-                <iframe ref={iframeRef} src={iframeSrc} title="Player" className="h-full w-full border-0"
-                  allow="fullscreen; encrypted-media; picture-in-picture" allowFullScreen
-                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation" />
+              {playerSourceId ? (
+                <NativeHlsPlayer
+                  sourceId={playerSourceId}
+                  category={category}
+                  resumeAt={resumeAt}
+                  autoPlay={prefs.autoPlay}
+                  autoSkip={prefs.autoSkip}
+                  onReady={handlePlayerReady}
+                  onProgress={handlePlayerProgress}
+                  onEnded={handlePlayerEnded}
+                  onError={setPlayerError}
+                />
               ) : (
                 <div className="flex aspect-video items-center justify-center text-sm text-[var(--muted)]">{playerError || "Select an episode"}</div>
               )}

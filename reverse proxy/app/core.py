@@ -471,6 +471,118 @@ def _cdn_url_path_is_m3u8(url: str) -> bool:
     return p.endswith(".m3u8")
 
 
+def _cdn_host_allowed_url(url: str) -> bool:
+    """Only proxy known stream/CDN hosts. Keeps /api/cdn-hls from becoming SSRF bait."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in CDN_HOST_SUFFIXES)
+
+
+def _cdn_upstream_fetch_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": MEGAPLAY_BASE,
+        "Referer": f"{MEGAPLAY_BASE}/",
+    }
+
+
+def _cdn_proxy_url(url: str, api_base: str, cdn_referer: str = "") -> str:
+    if not api_base:
+        return url
+    target = str(url or "").strip()
+    if not target.startswith(("http://", "https://")):
+        return url
+    if not _cdn_host_allowed_url(target):
+        return url
+    qs = {"u": target}
+    if cdn_referer:
+        qs["r"] = cdn_referer
+    return f"{api_base.rstrip('/')}/api/cdn-hls?{urlencode(qs)}"
+
+
+def _rewrite_m3u8_for_cdn_proxy(body: str, playlist_base: str, api_base: str, cdn_referer: str = "") -> str:
+    """Rewrite playlist URIs so hls.js requests variants/segments through our CDN proxy."""
+    def proxied(raw_url: str) -> str:
+        if raw_url.startswith(("data:", "blob:")):
+            return raw_url
+        return _cdn_proxy_url(urljoin(playlist_base, raw_url), api_base, cdn_referer)
+
+    out: List[str] = []
+    for line in body.splitlines():
+        rewritten = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{proxied(m.group(1))}"', line)
+        stripped = rewritten.strip()
+        if stripped and not stripped.startswith("#"):
+            rewritten = proxied(stripped)
+        out.append(rewritten)
+    return "\n".join(out) + ("\n" if body.endswith("\n") else "")
+
+
+def _maybe_rewrap_media(raw: dict, rewrite_base: Optional[str]) -> dict:
+    """Wrap Megaplay media URLs with /api/cdn-hls for same-origin HLS playback."""
+    if not rewrite_base or not isinstance(raw, dict):
+        return raw
+    out = json.loads(json.dumps(raw))
+
+    def ref_for(item: dict) -> str:
+        headers = item.get("headers") if isinstance(item.get("headers"), dict) else {}
+        ref = item.get("referer") or item.get("referrer") or headers.get("Referer") or headers.get("referer")
+        return str(ref).rstrip("/") if ref else MEGAPLAY_BASE
+
+    sources = out.get("sources")
+    source_items = sources if isinstance(sources, list) else [sources] if isinstance(sources, dict) else []
+    for item in source_items:
+        if not isinstance(item, dict):
+            continue
+        ref = ref_for(item)
+        for key in ("file", "url"):
+            if item.get(key):
+                item[key] = _cdn_proxy_url(str(item[key]), rewrite_base, ref)
+
+    streams = out.get("streams")
+    if isinstance(streams, list):
+        for item in streams:
+            if not isinstance(item, dict):
+                continue
+            ref = ref_for(item)
+            for key in ("file", "url"):
+                if item.get(key):
+                    item[key] = _cdn_proxy_url(str(item[key]), rewrite_base, ref)
+
+    tracks = out.get("tracks")
+    if isinstance(tracks, list):
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            ref = ref_for(track)
+            for key in ("file", "url"):
+                if track.get(key):
+                    track[key] = _cdn_proxy_url(str(track[key]), rewrite_base, ref)
+    return out
+
+
+def _log_stream_urls_from_payload(event: str, payload: dict, **fields: Any) -> None:
+    """Best-effort stream diagnostics. Logging must never break playback."""
+    try:
+        sources = payload.get("sources") if isinstance(payload, dict) else None
+        if isinstance(sources, dict):
+            sources = [sources]
+        urls = []
+        for item in sources or []:
+            if isinstance(item, dict):
+                url = item.get("file") or item.get("url")
+                if url:
+                    urls.append(str(url)[:180])
+        log.info(event, source_count=len(urls), first_source=urls[0] if urls else "", **fields)
+    except Exception:
+        return
+
+
 # Formats matching AniList
 FORMATS = ["TV", "TV_SHORT", "MOVIE", "SPECIAL", "OVA", "ONA", "MUSIC"]
 
@@ -520,6 +632,38 @@ class SessionManager:
 
 
 session_manager = SessionManager()
+
+
+async def _upstream_get(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    attempts: int = 3,
+    retry_delay: float = 0.35,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Small retry wrapper for flaky streaming upstreams. Keep attempts low."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(max(1, attempts)):
+        try:
+            resp = await client.get(url, **kwargs)
+            if resp.status_code not in (408, 429, 500, 502, 503, 504):
+                return resp
+            last_exc = httpx.HTTPStatusError(
+                f"Retryable upstream status {resp.status_code}",
+                request=resp.request,
+                response=resp,
+            )
+            if attempt == attempts - 1:
+                return resp
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                raise
+        await asyncio.sleep(retry_delay * (2 ** attempt))
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("upstream retry failed without response")
 
 
 
@@ -620,11 +764,16 @@ def _provider_cache_init() -> None:
                 CREATE TABLE IF NOT EXISTS anime_title_index (
                     mal_id INTEGER PRIMARY KEY,
                     title TEXT NOT NULL,
+                    poster TEXT NOT NULL DEFAULT '',
                     search_text TEXT NOT NULL,
                     updated_at REAL NOT NULL
                 )
                 """
             )
+            try:
+                conn.execute("ALTER TABLE anime_title_index ADD COLUMN poster TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS anime_title_index_search_idx ON anime_title_index (search_text)"
             )
@@ -733,7 +882,7 @@ def _title_index_search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
         with _provider_cache_conn() as conn:
             rows = conn.execute(
                 """
-                SELECT mal_id, title
+                SELECT mal_id, title, COALESCE(poster, '')
                 FROM anime_title_index
                 WHERE search_text LIKE ?
                 ORDER BY
@@ -752,20 +901,40 @@ def _title_index_search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
             "id": int(mal_id),
             "title": str(title),
             "title_romaji": str(title),
-            "poster": "",
+            "poster": str(poster or ""),
+            "coverImage": {"large": str(poster or "")} if poster else {},
             "isAdult": False,
             "genres": [],
         }
-        for mal_id, title in rows
+        for mal_id, title, poster in rows
     ]
+
+
+def _title_index_poster(item: dict) -> str:
+    for key in ("poster", "image", "img", "thumbnail", "cover", "picture", "cover_image"):
+        val = item.get(key)
+        if isinstance(val, str) and val.startswith(("http://", "https://")):
+            return val
+        if isinstance(val, dict):
+            nested = val.get("large") or val.get("url") or val.get("image_url")
+            if isinstance(nested, str) and nested.startswith(("http://", "https://")):
+                return nested
+    images = item.get("images")
+    if isinstance(images, dict):
+        return _jikan_image(images) or ""
+    return ""
 
 
 def _title_index_is_fresh() -> bool:
     _provider_cache_init()
     with _CACHE_DB_LOCK:
         with _provider_cache_conn() as conn:
-            row = conn.execute("SELECT MAX(updated_at), COUNT(*) FROM anime_title_index").fetchone()
+            row = conn.execute(
+                "SELECT MAX(updated_at), COUNT(*), COUNT(NULLIF(poster, '')) FROM anime_title_index"
+            ).fetchone()
     if not row or not row[0] or int(row[1] or 0) < 1000:
+        return False
+    if int(row[2] or 0) < 100:
         return False
     return (time.time() - float(row[0])) < _ANIME_INDEX_TTL
 
@@ -779,7 +948,7 @@ async def _refresh_title_index_background() -> None:
         payload = r.json()
         items = payload if isinstance(payload, list) else list(payload.values()) if isinstance(payload, dict) else []
         now = time.time()
-        rows: List[Tuple[int, str, str, float]] = []
+        rows: List[Tuple[int, str, str, str, float]] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -792,19 +961,21 @@ async def _refresh_title_index_background() -> None:
             except Exception:
                 continue
             title_s = str(title).strip()
+            poster = _title_index_poster(item)
             search_text = re.sub(r"[^a-z0-9]+", " ", title_s.lower()).strip()
             if title_s and search_text:
-                rows.append((mid, title_s, search_text, now))
+                rows.append((mid, title_s, poster, search_text, now))
         if not rows:
             return
         with _CACHE_DB_LOCK:
             with _provider_cache_conn() as conn:
                 conn.executemany(
                     """
-                    INSERT INTO anime_title_index (mal_id, title, search_text, updated_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO anime_title_index (mal_id, title, poster, search_text, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(mal_id) DO UPDATE SET
                         title=excluded.title,
+                        poster=excluded.poster,
                         search_text=excluded.search_text,
                         updated_at=excluded.updated_at
                     """,
@@ -847,6 +1018,73 @@ def _megaplay_proxy_referer(request: Request, upstream_path: str) -> str:
                     cat_guess = _normalize_stream_category(m2.group(1))
             return f"{MEGAPLAY_BASE}/stream/s-2/{qid}/{cat_guess}"
     return f"{MEGAPLAY_BASE}/"
+
+
+def _megaplay_getsources_headers(referer: str) -> Dict[str, str]:
+    origin = f"{urlparse(MEGAPLAY_BASE).scheme}://{urlparse(MEGAPLAY_BASE).netloc}"
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer,
+        "Origin": origin,
+        "X-Requested-With": "XMLHttpRequest",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+    }
+
+
+_MEGAPLAY_SOURCES_ID_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+_MEGAPLAY_SOURCES_ID_TTL = 3600.0
+
+
+async def _megaplay_realid_to_sources_id(realid: str, category: str = "sub") -> Optional[str]:
+    """
+    Megaplay embed URLs expose one ID, but /stream/getSources often needs the
+    inner data-id from the embed HTML. Supports numeric s-2 IDs and mal_X_Y.
+    """
+    raw = str(realid or "").strip()
+    cat = _normalize_stream_category(category)
+    if not raw:
+        return None
+
+    cache_key = f"{raw}:{cat}"
+    now = time.monotonic()
+    cached = _MEGAPLAY_SOURCES_ID_CACHE.get(cache_key)
+    if cached is not None and (now - cached[0]) < _MEGAPLAY_SOURCES_ID_TTL:
+        return cached[1]
+
+    if raw.startswith("mal_"):
+        parts = raw.split("_", 2)
+        if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+            return None
+        embed_url = f"{MEGAPLAY_BASE}/stream/mal/{parts[1]}/{parts[2]}/{cat}"
+    else:
+        embed_url = f"{MEGAPLAY_BASE}/stream/s-2/{quote(raw, safe='')}/{cat}"
+
+    try:
+        client = await session_manager.get_client()
+        r = await _upstream_get(
+            client,
+            embed_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": f"{MEGAPLAY_BASE}/",
+                "Origin": MEGAPLAY_BASE,
+            },
+            timeout=12.0,
+        )
+        r.raise_for_status()
+        match = re.search(r'\bdata-id=["\']?(\d+)', r.text)
+        out = match.group(1) if match else (raw if raw.isdigit() else None)
+        _MEGAPLAY_SOURCES_ID_CACHE[cache_key] = (now, out)
+        return out
+    except Exception as exc:
+        log.warning("megaplay_sources_id_resolve_failed", realid=raw, category=cat, error=str(exc)[:120])
+        _MEGAPLAY_SOURCES_ID_CACHE[cache_key] = (now, None)
+        return None
 
 
 def _rewrite_megaplay_html(body: str, public_base: str) -> str:
@@ -1552,7 +1790,7 @@ async def get_megaplay_sources(
     headers = _megaplay_getsources_headers(referer)
 
     try:
-        resp = await client.get(url, headers=headers)
+        resp = await _upstream_get(client, url, headers=headers, timeout=12.0)
         resp.raise_for_status()
         out = resp.json()
         _log_stream_urls_from_payload(
@@ -2519,6 +2757,14 @@ async def _megaplay_proxy_get_sources(request: Request, path: str) -> Response:
                             data_id = m.group(1)
                     except Exception:
                         pass
+                if not data_id:
+                    stream_url = await _mapper_resolve_stream(int(mal_id), int(ep_num), iframe_cat)
+                    m_stream = re.search(r"/stream/s-2/([^/?#]+)/", stream_url or "")
+                    if m_stream:
+                        realid = unquote(m_stream.group(1))
+                        data_id = await _megaplay_realid_to_sources_id(realid, iframe_cat)
+                        if not data_id and realid.isdigit():
+                            data_id = realid
                 return data_id
         return None
 
@@ -2531,7 +2777,7 @@ async def _megaplay_proxy_get_sources(request: Request, path: str) -> Response:
     referer = _megaplay_proxy_referer(request, path)
     url = f"{GET_SOURCES_ENDPOINT}?id={quote(eid, safe='')}"
     client = await session_manager.get_client()
-    r = await client.get(url, headers=_megaplay_getsources_headers(referer), follow_redirects=True)
+    r = await _upstream_get(client, url, headers=_megaplay_getsources_headers(referer), timeout=12.0)
     if r.status_code == 200:
         j = r.json()
         _log_stream_urls_from_payload(
@@ -2591,7 +2837,7 @@ async def cdn_hls_proxy(
         pr = await client.head(target, headers=hdr, follow_redirects=True)
         log.info("cdn_hls_head", upstream_host=up_host, status=pr.status_code)
         return Response(status_code=pr.status_code, headers=_filter_response_headers(dict(pr.headers)))
-    r = await client.get(target, headers=hdr, follow_redirects=True)
+    r = await _upstream_get(client, target, headers=hdr, timeout=20.0)
     ct = (r.headers.get("content-type") or "").lower()
     head = (r.content[:4096] if r.content else b"").decode("utf-8", errors="ignore")
     peek = ""
