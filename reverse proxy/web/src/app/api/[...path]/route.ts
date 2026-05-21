@@ -1,5 +1,7 @@
 import {
   staticAnime,
+  staticEpisodeCounts,
+  staticEpisodes,
   staticFilter,
   staticGenres,
   staticHomepage,
@@ -90,6 +92,7 @@ export async function GET(request: Request, context: RouteContext) {
   if (pathname === "filter") return json(staticFilter(url.searchParams));
   if (pathname === "genres") return json(staticGenres());
   if (pathname === "homepage") return json(staticHomepage());
+  if (pathname === "episode-counts") return json(staticEpisodeCounts(url.searchParams));
   if (pathname === "spotlight") return json({ results: staticSection("trending", url.searchParams).results.slice(0, 10) });
   if (pathname === "schedule") return json({ page: 1, perPage: 20, total: 0, hasNextPage: false, results: [] });
 
@@ -104,6 +107,12 @@ export async function GET(request: Request, context: RouteContext) {
 
   const relationsMatch = pathname.match(/^anime\/(\d+)\/relations$/);
   if (relationsMatch) return json(staticRelations(Number(relationsMatch[1])));
+
+  const episodesMatch = pathname.match(/^anime\/(\d+)\/episodes$/);
+  if (episodesMatch) {
+    const payload = staticEpisodes(Number(episodesMatch[1]));
+    return payload ? json(payload) : proxyToBackend(request, path);
+  }
 
   const recommendationsMatch = pathname.match(/^anime\/(\d+)\/recommendations$/);
   if (recommendationsMatch) return json(staticRecommendations(Number(recommendationsMatch[1]), url.searchParams));

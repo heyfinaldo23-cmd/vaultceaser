@@ -22,13 +22,28 @@ const HOT_QUERIES = [
   "death note",
 ];
 
+const RELATION_MAP = {
+  Sequel: "SEQUEL",
+  Prequel: "PREQUEL",
+  "Alternative version": "ALTERNATIVE",
+  "Side story": "SIDE_STORY",
+  "Parent story": "PARENT",
+  Summary: "SUMMARY",
+  SpinOff: "SPIN_OFF",
+  "Spin-off": "SPIN_OFF",
+  Other: "OTHER",
+};
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function fetchJson(url, attempts = 3) {
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const res = await fetch(url, {
+        signal: controller.signal,
         headers: {
           "User-Agent": "VaultCeaserStaticCatalog/1.0",
           Accept: "application/json",
@@ -44,6 +59,8 @@ async function fetchJson(url, attempts = 3) {
     } catch (error) {
       lastError = error;
       await sleep(900 + attempt * 800);
+    } finally {
+      clearTimeout(timeout);
     }
   }
   throw lastError;
@@ -207,6 +224,76 @@ async function main() {
     } catch (error) {
       console.warn(`Detail ${id} failed: ${error?.message || error}`);
     }
+  }
+
+  const relationSeeds = [...new Set([
+    ...HOT_IDS,
+    ...sections.trending.slice(0, 12),
+    ...sections.popular.slice(0, 12),
+    ...sections.recent.slice(0, 12),
+  ])];
+  const relationRows = new Map();
+  const relatedIds = new Set();
+
+  for (const id of relationSeeds) {
+    try {
+      console.log(`Relations ${id}`);
+      const payload = await jikan(`/anime/${id}/relations`);
+      const edges = [];
+      for (const rel of payload.data || []) {
+        const relationType = RELATION_MAP[rel.relation] || String(rel.relation || "").toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+        for (const entry of rel.entry || []) {
+          if (entry.type !== "anime" || !entry.mal_id) continue;
+          const relatedId = Number(entry.mal_id);
+          edges.push({ relationType, id: relatedId });
+          relatedIds.add(relatedId);
+          if (!media.has(relatedId)) {
+            mergeMedia(media, {
+              id: relatedId,
+              mal_id: relatedId,
+              title: { english: entry.name || "", romaji: entry.name || "", native: null },
+              coverImage: {},
+              bannerImage: "",
+              genres: [],
+              studios: [],
+              episodes: null,
+              isAdult: false,
+            }, false);
+          }
+        }
+      }
+      relationRows.set(id, edges);
+    } catch (error) {
+      console.warn(`Relations ${id} failed: ${error?.message || error}`);
+    }
+  }
+
+  for (const id of relatedIds) {
+    const existing = media.get(id);
+    if (existing?.staticDetailed) continue;
+    try {
+      console.log(`Related detail ${id}`);
+      const payload = await jikan(`/anime/${id}`);
+      if (payload.data) mergeMedia(media, jikanToMedia(payload.data), true);
+    } catch (error) {
+      console.warn(`Related detail ${id} failed: ${error?.message || error}`);
+    }
+  }
+
+  for (const [id, edges] of relationRows) {
+    const item = media.get(id);
+    if (!item) continue;
+    item.relations = {
+      edges: edges
+        .map((edge) => {
+          const node = media.get(edge.id);
+          if (!node) return null;
+          const safeNode = { ...node };
+          delete safeNode.relations;
+          return { relationType: edge.relationType, node: safeNode };
+        })
+        .filter(Boolean),
+    };
   }
 
   const genres = [...new Set([...media.values()].flatMap((item) => item.genres || []))]

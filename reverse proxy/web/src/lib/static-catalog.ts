@@ -207,6 +207,51 @@ export function staticRelations(id: number) {
   };
 }
 
+export function staticEpisodes(id: number) {
+  const info = mediaById.get(id);
+  const total = Math.max(0, Math.floor(Number(info?.episodes || 0)));
+  if (!info || total <= 0) return null;
+  const episodes = Array.from({ length: total }, (_, index) => {
+    const number = index + 1;
+    return {
+      id: `mal:${id}:${number}`,
+      number,
+      title: `Episode ${number}`,
+      original_id: `mal:${id}:${number}`,
+    };
+  });
+  return {
+    id,
+    providers: {
+      megaplay: {
+        episodes: {
+          sub: episodes,
+          dub: [],
+          ssub: episodes,
+        },
+      },
+    },
+    released: {
+      sub: total,
+      dub: 0,
+    },
+  };
+}
+
+export function staticEpisodeCounts(searchParams: URLSearchParams) {
+  const ids = (searchParams.get("ids") || "")
+    .split(",")
+    .map((id) => Number(id.trim()))
+    .filter((id) => Number.isFinite(id) && id > 0)
+    .slice(0, 50);
+  const counts: Record<string, { sub: number; dub: number }> = {};
+  for (const id of ids) {
+    const total = Math.max(0, Math.floor(Number(mediaById.get(id)?.episodes || 0)));
+    counts[String(id)] = { sub: total, dub: 0 };
+  }
+  return { counts };
+}
+
 export function staticRecommendations(id: number, searchParams: URLSearchParams) {
   const { page, perPage } = pageParams(searchParams);
   const info = mediaById.get(id);

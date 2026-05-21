@@ -26,21 +26,22 @@ function isValidSeasonMedia(media: AnimeMedia): boolean {
   if (!media.id || media.id <= 0) return false;
   if (media.type && media.type !== "ANIME") return false;
   if (media.isAdult) return false;
-  if (media.format && ["MUSIC", "MANGA", "NOVEL", "ONE_SHOT"].includes(media.format)) {
+  const fmt = (media.format || "").toUpperCase();
+  if (fmt && ["MUSIC", "MANGA", "NOVEL", "ONE_SHOT"].includes(fmt)) {
     return false;
   }
   return true;
 }
 
 function seasonSortValue(media: AnimeMedia): number {
-  const y = media.startDate?.year ?? media.seasonYear;
+  const y = media.startDate?.year ?? media.seasonYear ?? media.year;
   if (y) return y * 10000 + (media.startDate?.month ?? 0) * 100 + (media.startDate?.day ?? 0);
   return media.status === "NOT_YET_RELEASED" ? Number.MAX_SAFE_INTEGER - 1 : media.id;
 }
 
 function entryLabel(media: AnimeMedia, index: number, isCurrent: boolean): string {
   if (isCurrent) return "You are here";
-  const fmt = media.format || "";
+  const fmt = (media.format || "").toUpperCase();
   if (fmt === "MOVIE") return "Movie";
   if (fmt === "OVA") return "OVA";
   if (fmt === "SPECIAL") return "Special";
@@ -102,7 +103,7 @@ export function buildSeasonList(
     const label = entryLabel(row.media, part, !!row.isCurrent);
     // Always increment so subsequent entries get the correct number regardless
     // of whether the current entry is the "You are here" slot.
-    const fmt = row.media.format || "";
+    const fmt = (row.media.format || "").toUpperCase();
     if (!["MOVIE", "OVA", "SPECIAL", "ONA"].includes(fmt)) {
       part += 1;
     }
