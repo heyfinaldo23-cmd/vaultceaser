@@ -531,6 +531,8 @@ _EP_COUNTS_CACHE: Dict[int, Tuple[float, Dict[str, int]]] = {}
 _EP_COUNTS_CACHE_TTL = 300.0
 _EP_COUNTS_REFRESH_TASKS: Dict[int, asyncio.Task] = {}
 _EP_COUNTS_BACKGROUND_SEM = asyncio.Semaphore(2)
+_ANIME_INDEX_TASK: Optional[asyncio.Task] = None
+_ANIME_INDEX_TTL = 86400.0
 _MAL_EPISODES_CACHE: Dict[int, Tuple[float, Dict[str, Any]]] = {}
 _MAL_EPISODES_CACHE_TTL = 300.0
 
@@ -612,6 +614,19 @@ def _provider_cache_init() -> None:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS api_cache_updated_idx ON api_cache (updated_at)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS anime_title_index (
+                    mal_id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    search_text TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS anime_title_index_search_idx ON anime_title_index (search_text)"
             )
         _CACHE_DB_READY = True
 
@@ -706,6 +721,109 @@ def _provider_cache_save_json(cache_key: str, value: Any) -> None:
                 """,
                 (cache_key, json.dumps(value, separators=(",", ":")), time.time()),
             )
+
+
+def _title_index_search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
+    q = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
+    if len(q) < 2:
+        return []
+    like = f"%{q}%"
+    _provider_cache_init()
+    with _CACHE_DB_LOCK:
+        with _provider_cache_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT mal_id, title
+                FROM anime_title_index
+                WHERE search_text LIKE ?
+                ORDER BY
+                    CASE
+                        WHEN search_text = ? THEN 0
+                        WHEN search_text LIKE ? THEN 1
+                        ELSE 2
+                    END,
+                    length(title) ASC
+                LIMIT ?
+                """,
+                (like, q, f"{q}%", int(limit)),
+            ).fetchall()
+    return [
+        {
+            "id": int(mal_id),
+            "title": str(title),
+            "title_romaji": str(title),
+            "poster": "",
+            "isAdult": False,
+            "genres": [],
+        }
+        for mal_id, title in rows
+    ]
+
+
+def _title_index_is_fresh() -> bool:
+    _provider_cache_init()
+    with _CACHE_DB_LOCK:
+        with _provider_cache_conn() as conn:
+            row = conn.execute("SELECT MAX(updated_at), COUNT(*) FROM anime_title_index").fetchone()
+    if not row or not row[0] or int(row[1] or 0) < 1000:
+        return False
+    return (time.time() - float(row[0])) < _ANIME_INDEX_TTL
+
+
+async def _refresh_title_index_background() -> None:
+    global _ANIME_INDEX_TASK
+    try:
+        client = await session_manager.get_client()
+        r = await client.get("https://animeapi.my.id/animeApi.json", headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=30.0)
+        r.raise_for_status()
+        payload = r.json()
+        items = payload if isinstance(payload, list) else list(payload.values()) if isinstance(payload, dict) else []
+        now = time.time()
+        rows: List[Tuple[int, str, str, float]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            mal_id = item.get("myanimelist") or item.get("mal") or item.get("mal_id")
+            title = item.get("title")
+            if not mal_id or not title:
+                continue
+            try:
+                mid = int(mal_id)
+            except Exception:
+                continue
+            title_s = str(title).strip()
+            search_text = re.sub(r"[^a-z0-9]+", " ", title_s.lower()).strip()
+            if title_s and search_text:
+                rows.append((mid, title_s, search_text, now))
+        if not rows:
+            return
+        with _CACHE_DB_LOCK:
+            with _provider_cache_conn() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO anime_title_index (mal_id, title, search_text, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(mal_id) DO UPDATE SET
+                        title=excluded.title,
+                        search_text=excluded.search_text,
+                        updated_at=excluded.updated_at
+                    """,
+                    rows,
+                )
+        log.info("anime_title_index_refreshed", count=len(rows))
+    except Exception as exc:
+        log.warning("anime_title_index_refresh_failed", error=str(exc)[:120])
+    finally:
+        _ANIME_INDEX_TASK = None
+
+
+def _schedule_title_index_refresh() -> None:
+    global _ANIME_INDEX_TASK
+    if _title_index_is_fresh():
+        return
+    if _ANIME_INDEX_TASK and not _ANIME_INDEX_TASK.done():
+        return
+    _ANIME_INDEX_TASK = asyncio.create_task(_refresh_title_index_background())
 
 
 def _megaplay_proxy_referer(request: Request, upstream_path: str) -> str:
@@ -1462,6 +1580,7 @@ async def get_megaplay_sources(
 async def _app_lifespan(_app: FastAPI):
     await discord_logger.start()
     _provider_cache_load()
+    _schedule_title_index_refresh()
     log.info(
         "app_startup",
         stream_upstream=MEGAPLAY_BASE,
@@ -1636,25 +1755,9 @@ async def search_anime(
 async def search_suggestions(
     q: str = Query(..., min_length=1, description="Search query for autocomplete"),
 ):
-    """Lightweight search for autocomplete dropdowns."""
-    result = await _jikan_search(q=q, page=1, per_page=8)
-    return {
-        "results": [
-            {
-                "id": a["mal_id"],
-                "title": (a["title"].get("english") or a["title"].get("romaji") or ""),
-                "title_romaji": a["title"].get("romaji", ""),
-                "poster": (a.get("coverImage") or {}).get("large", ""),
-                "format": a.get("format"),
-                "status": a.get("status"),
-                "year": a.get("year"),
-                "episodes": a.get("episodes"),
-                "isAdult": False,
-                "genres": a.get("genres", []),
-            }
-            for a in result["results"]
-        ]
-    }
+    """Autocomplete from local title index; never blocks on external APIs."""
+    _schedule_title_index_refresh()
+    return {"results": _title_index_search(q, limit=8)}
 
 
 # ─── Filter / Browse ─────────────────────────────────────────────────────────
@@ -1878,7 +1981,7 @@ async def _resolve_episode_counts(mal_id: int, refresh: bool = True) -> Dict[str
 async def _refresh_episode_counts_background(mal_id: int) -> None:
     try:
         async with _EP_COUNTS_BACKGROUND_SEM:
-            counts = await _resolve_episode_counts(mal_id, refresh=True)
+            counts = await asyncio.wait_for(_resolve_episode_counts(mal_id, refresh=True), timeout=25.0)
         # Persist only useful provider/Jikan fallback results. A provider miss
         # should not poison the cache as "confirmed no episodes".
         if (counts.get("sub") or 0) > 0 or (counts.get("dub") or 0) > 0:
@@ -1899,32 +2002,33 @@ def _schedule_episode_counts_refresh(mal_id: int) -> None:
 
 async def batch_episode_counts(
     ids: str = Query(..., description="Comma-separated MAL IDs (max 50)"),
-    refresh: bool = Query(False, description="Bypass cache"),
+    refresh: bool = Query(False, description="Schedule a background refresh"),
+    blocking: bool = Query(False, description="Wait for live provider refresh; never use from browser grids"),
 ):
     """Released sub/dub counts for browse/home cards, cached for 5 minutes."""
     id_list: List[int] = [int(p) for p in ids.split(",") if p.strip().isdigit()][:50]
     if not id_list:
         return {"counts": {}}
 
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(2)
 
     async def one(mid: int) -> Tuple[int, Dict[str, int]]:
         now = time.monotonic()
         cached = _EP_COUNTS_CACHE.get(mid)
-        if cached and not refresh:
+        if cached and not blocking:
             if (now - cached[0]) >= _EP_COUNTS_CACHE_TTL:
                 _schedule_episode_counts_refresh(mid)
             return mid, cached[1]
 
-        # Normal homepage/browse calls must be cheap. If this ID is uncached,
-        # warm it in the background and let the client retry/poll.
-        if not refresh:
+        # Homepage/browse calls must be cheap. Even refresh=true only schedules
+        # warming; blocking=true is reserved for manual diagnostics.
+        if not blocking:
             _schedule_episode_counts_refresh(mid)
             return mid, {"sub": 0, "dub": 0}
 
         async with sem:
             try:
-                counts = await _resolve_episode_counts(mid, refresh=True)
+                counts = await asyncio.wait_for(_resolve_episode_counts(mid, refresh=True), timeout=25.0)
                 if (counts.get("sub") or 0) > 0 or (counts.get("dub") or 0) > 0:
                     _provider_cache_save_episode_counts(mid, counts)
                 _EP_COUNTS_CACHE[mid] = (time.monotonic(), counts)

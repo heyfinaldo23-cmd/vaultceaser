@@ -35,7 +35,7 @@ export default function Navbar() {
   const onSearch = (val: string) => {
     setQuery(val);
     if (debounce.current) clearTimeout(debounce.current);
-    if (val.trim().length < 2) {
+    if (val.trim().length < 3) {
       setSuggestions([]);
       setOpen(false);
       return;
@@ -61,7 +61,7 @@ export default function Navbar() {
       } catch {
         setSuggestions([]);
       }
-    }, 280);
+    }, 500);
   };
 
   const searchBox = (mobile = false) => (
