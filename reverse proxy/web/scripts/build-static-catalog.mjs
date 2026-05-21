@@ -231,6 +231,9 @@ async function main() {
     ...sections.trending.slice(0, 12),
     ...sections.popular.slice(0, 12),
     ...sections.recent.slice(0, 12),
+    ...[...media.values()]
+      .filter((item) => item.staticDetailed)
+      .map((item) => item.id),
   ])];
   const relationRows = new Map();
   const relatedIds = new Set();

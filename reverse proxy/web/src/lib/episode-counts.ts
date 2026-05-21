@@ -33,6 +33,11 @@ function getCached(id: number): ReleasedCounts | null {
   return { sub: entry.sub, dub: entry.dub };
 }
 
+/** Persist provider-derived counts after watch/detail loads episodes. */
+export function rememberEpisodeCounts(counts: EpisodeCountsMap) {
+  setCached(counts);
+}
+
 function setCached(counts: EpisodeCountsMap) {
   const store = readCache();
   const now = Date.now();

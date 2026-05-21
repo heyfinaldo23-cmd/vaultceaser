@@ -24,7 +24,7 @@ import { animeTitle } from "@/lib/anime-title";
 import { formatAnimeDate, resolveTrailer } from "@/lib/anime-trailer";
 import { clientApi } from "@/lib/client-api";
 import { useAuth } from "@/components/AuthProvider";
-import { fetchEpisodeCounts } from "@/lib/episode-counts";
+import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
 import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
 import { filterExternalLinks, isBlockedExternalLink } from "@/lib/external-links";
 
@@ -87,6 +87,17 @@ export default function AnimeOverviewPage() {
         dubN = counts[id]?.dub ?? 0;
       }
       setEpCounts({ sub: subN, dub: dubN });
+      if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
+
+      // If episodes call failed, try batch counts endpoint for fresher data
+      if (epRes.status === "rejected" && subN === 0 && dubN === 0) {
+        fetchEpisodeCounts([id]).then((counts) => {
+          const c = counts[id];
+          if (!c) return;
+          setEpCounts({ sub: Math.max(subN, c.sub), dub: Math.max(dubN, c.dub) });
+          if (c.sub > 0 || c.dub > 0) rememberEpisodeCounts({ [id]: { sub: c.sub, dub: c.dub } });
+        }).catch(() => {});
+      }
 
       if (recRes.status === "fulfilled") {
         const recommendations = (recRes.value.recommendations || [])

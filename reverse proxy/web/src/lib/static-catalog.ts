@@ -12,6 +12,11 @@ const data = catalog as StaticCatalog;
 const allMedia = data.media.filter((item) => item?.id && !item.isAdult);
 const mediaById = new Map(allMedia.map((item) => [item.id, item]));
 
+/** Lookup catalog media by MAL id (for relation nodes). */
+export function getMediaById(id: number): AnimeMedia | undefined {
+  return mediaById.get(id);
+}
+
 const SEARCH_ALIASES: Record<string, string> = {
   jjk: "jujutsu kaisen",
   "jujustu kaisen": "jujutsu kaisen",

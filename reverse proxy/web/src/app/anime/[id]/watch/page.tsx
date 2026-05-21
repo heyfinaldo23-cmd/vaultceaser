@@ -17,7 +17,7 @@ import { animeTitle } from "@/lib/anime-title";
 import { clientApi } from "@/lib/client-api";
 import { useAuth } from "@/components/AuthProvider";
 import { loadPlayerPrefs, savePlayerPrefs, type PlayerPrefs } from "@/lib/player-prefs";
-import { fetchEpisodeCounts } from "@/lib/episode-counts";
+import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
 import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
 import {
   getLatestLocalWatchForAnime,
@@ -219,14 +219,18 @@ function WatchPageInner() {
 
       let subList: EpisodeData[] = [];
       let dubList: EpisodeData[] = [];
+      let releasedSub = 0;
+      let releasedDub = 0;
 
       if (epRes.status === "fulfilled") {
         const meg = epRes.value.providers?.megaplay?.episodes ?? {};
         subList = (meg.sub ?? []) as EpisodeData[];
         dubList = (meg.dub ?? []) as EpisodeData[];
+        releasedSub = epRes.value.released?.sub ?? 0;
+        releasedDub = epRes.value.released?.dub ?? 0;
       }
 
-      // If no episodes from backend yet, build synthetic list from anime episode count
+      // Build synthetic sub list from episode count when backend hasn't indexed yet
       const totalEps = info.episodes ?? 0;
       if (!subList.length && totalEps > 0) {
         subList = Array.from({ length: totalEps }, (_, i) => ({
@@ -235,26 +239,30 @@ function WatchPageInner() {
           title: `Episode ${i + 1}`,
         }));
       }
-      if (!dubList.length && subList.length) {
-        dubList = subList;
-      }
 
-      const subN = subList.length;
-      const dubN = dubList.length;
-      setMegaplayEps({ sub: subList, dub: dubList });
+      // Dub playlist: use real dub episodes from provider, do NOT fall back to sub list
+      // (showing sub episodes as dub would be wrong — we just show count from released)
+      const subN = Math.max(subList.length, releasedSub);
+      const dubN = Math.max(dubList.length, releasedDub);
+
+      setMegaplayEps({ sub: subList, dub: dubList.length ? dubList : subList });
       setEpCounts({ sub: subN, dub: dubN });
+      if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
 
+      // Async: try to get a better dub count from the batch endpoint (backend may have fresher data)
       fetchEpisodeCounts([id]).then((counts) => {
         const c = counts[id];
         if (!c) return;
-        setEpCounts((prev) => ({ ...prev, dub: c.dub }));
-        if (c.dub > 0) setMegaplayEps((prev) => ({ ...prev, dub: prev?.sub ?? subList }));
+        const betterSub = Math.max(subN, c.sub);
+        const betterDub = Math.max(dubN, c.dub);
+        setEpCounts({ sub: betterSub, dub: betterDub });
+        if (betterSub > 0 || betterDub > 0) rememberEpisodeCounts({ [id]: { sub: betterSub, dub: betterDub } });
       }).catch(() => {});
 
       const cat = searchParams.get("cat") === "dub" ? "dub" : "sub";
-      const list = cat === "dub" ? dubList : subList;
+      const playList = cat === "dub" ? (dubList.length ? dubList : subList) : subList;
       setCategory(cat);
-      setEpisodes(list);
+      setEpisodes(playList);
 
       if (recRes.status === "fulfilled") {
         setRecs(filterAnimeList((recRes.value.recommendations || []).map((r) => r.mediaRecommendation).filter(Boolean)));
@@ -289,16 +297,16 @@ function WatchPageInner() {
 
       const epNum = Number(searchParams.get("ep"));
       const p = loadPlayerPrefs();
-      if (epNum && list.length) {
-        const found = list.find((ep: EpisodeData) => ep.number === epNum);
+      if (epNum && playList.length) {
+        const found = playList.find((ep: EpisodeData) => ep.number === epNum);
         if (found) await playEpisode(found, cat);
       } else {
         const latest = getLatestLocalWatchForAnime(id);
         const latestCat = latest?.category === "dub" ? "dub" : "sub";
-        const latestList = latestCat === "dub" ? dubList : subList;
+        const latestList = latestCat === "dub" ? (dubList.length ? dubList : subList) : subList;
         const latestEpisode = latest ? latestList.find((ep: EpisodeData) => ep.number === latest.episodeNumber) : null;
         if (latestEpisode) { setCategory(latestCat); setEpisodes(latestList); await playEpisode(latestEpisode, latestCat); }
-        else if (p.autoPlay && list.length) await playEpisode(list[0], cat);
+        else if (p.autoPlay && playList.length) await playEpisode(playList[0], cat);
       }
     } catch (e) {
       console.error(e);
