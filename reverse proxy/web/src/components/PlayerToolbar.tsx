@@ -48,7 +48,7 @@ function Btn({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "flex min-w-0 items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 font-mono text-[10px] font-semibold transition-colors sm:px-3 sm:text-[11px]",
+        "flex min-w-0 items-center justify-center gap-1 rounded-md border px-2 py-1 font-mono text-[9px] font-semibold transition-colors sm:px-2.5 sm:text-[10px]",
         disabled && "cursor-not-allowed opacity-40",
         active
           ? "border-[#e8621a]/70 bg-[#e8621a]/15 text-[#e8621a]"

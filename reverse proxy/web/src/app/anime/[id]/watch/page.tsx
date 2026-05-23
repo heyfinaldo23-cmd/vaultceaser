@@ -355,7 +355,22 @@ function WatchPageInner() {
   useEffect(() => { hasNextRef.current = hasNext; }, [hasNext]);
 
   const toggleExpandedPlayer = useCallback(() => {
-    setExpanded((prev) => !prev);
+    setExpanded((prev) => {
+      const next = !prev;
+      // On mobile, lock to landscape when expanded, release when shrunk
+      if (typeof window !== "undefined" && "orientation" in screen) {
+        try {
+          if (next) {
+            (screen as any).orientation?.lock?.("landscape");
+          } else {
+            (screen as any).orientation?.unlock?.();
+          }
+        } catch {
+          // Orientation lock not supported or denied
+        }
+      }
+      return next;
+    });
   }, []);
 
   const handlePlayerReady = useCallback((data: NativePlayerProgress) => {

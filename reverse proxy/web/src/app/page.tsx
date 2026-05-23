@@ -110,31 +110,6 @@ function HScroll({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ─── A-Z Browse ───────────────────────────────────────────────────────────────
-
-const AZ_LETTERS = ["#", "0-9", ...Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZ")];
-
-function AZBrowse() {
-  return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-      <p className="mb-3 font-mono text-[10px] font-bold uppercase tracking-widest text-[var(--muted)]">
-        A-Z List · Browse anime alphabetically
-      </p>
-      <div className="flex flex-wrap gap-1.5">
-        {AZ_LETTERS.map((l) => (
-          <Link
-            key={l}
-            href={`/browse?letter=${encodeURIComponent(l)}`}
-            className="rounded border border-[var(--border)] px-2.5 py-1 font-mono text-[11px] font-bold text-[var(--muted)] hover:border-[var(--accent)] hover:text-white transition-colors"
-          >
-            {l}
-          </Link>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // ─── Continue Watching ────────────────────────────────────────────────────────
 
 type ContinueItem = {
@@ -166,13 +141,6 @@ function mergeContinueItems(items: ContinueItem[]) {
   return [...items]
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
     .filter((item) => { if (seen.has(item.animeId)) return false; seen.add(item.animeId); return true; });
-}
-
-function formatResumeTime(seconds?: number | null) {
-  if (!seconds || seconds < 1) return null;
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
 // ─── Otakubox card row ────────────────────────────────────────────────────────
@@ -248,30 +216,25 @@ export default function HomePage() {
           {continueList.length > 0 && (
             <section>
               <SectionHeader title="Continue Watching" href="/profile?tab=continue" label="See all" />
-              <div className="flex flex-col gap-2">
+              <HScroll>
                 {continueList.map((w) => {
-                  const resumeTime = formatResumeTime(w.positionSeconds);
+                  const media: AnimeMedia = {
+                    id: w.animeId,
+                    title: { english: w.animeTitle || undefined, romaji: w.animeTitle || undefined },
+                    coverImage: { large: w.poster || undefined, extraLarge: w.poster || undefined },
+                    episodes: null,
+                  };
                   return (
-                    <Link
-                      key={w.id}
-                      href={`/anime/${w.animeId}/watch?ep=${w.episodeNumber}&cat=${w.category}`}
-                      className="flex items-center gap-3 rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 font-mono text-xs font-bold hover:border-[var(--accent)]"
-                    >
-                      {w.poster && (
-                        <img src={w.poster} alt="" className="h-12 w-9 shrink-0 rounded object-cover" loading="lazy" />
-                      )}
-                      <span className="min-w-0">
-                        <span className="block truncate text-[var(--foreground)]">
-                          {w.animeTitle || `Anime #${w.animeId}`}
-                        </span>
-                        <span className="text-[var(--muted)]">
-                          EP {w.episodeNumber} ({w.category}){resumeTime ? ` · ${resumeTime}` : ""}
-                        </span>
-                      </span>
-                    </Link>
+                    <div key={w.id} className="w-[140px] shrink-0 sm:w-[160px]">
+                      <AnimeCard
+                        anime={media}
+                        size="compact"
+                        href={`/anime/${w.animeId}/watch?ep=${w.episodeNumber}&cat=${w.category}`}
+                      />
+                    </div>
                   );
                 })}
-              </div>
+              </HScroll>
             </section>
           )}
 
@@ -286,10 +249,6 @@ export default function HomePage() {
             <SectionHeader title="Recently Updated" href="/browse?sort=recent" />
             {recentLoading ? <OtakuRowSkeleton /> : <OtakuRow cards={recent} />}
           </section>
-
-          {/* A-Z Browse */}
-          <section><AZBrowse /></section>
-
         </div>
 
         <aside className="pointer-events-none fixed bottom-0 right-0 z-[9999] hidden xl:block">

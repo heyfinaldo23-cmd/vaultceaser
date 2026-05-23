@@ -18,6 +18,8 @@ interface AnimeCardProps {
   subCount?: number;
   /** Released dub episodes on stream provider */
   dubCount?: number;
+  /** Override the default link href (defaults to /anime/{id}) */
+  href?: string;
 }
 
 export default function AnimeCard({
@@ -29,7 +31,9 @@ export default function AnimeCard({
   className,
   subCount,
   dubCount,
+  href,
 }: AnimeCardProps) {
+  const linkHref = href || `/anime/${anime.id}`;
   const title = animeTitle(anime);
   const image = anime.coverImage?.large || anime.coverImage?.extraLarge || "";
   const format = anime.format || "TV";
@@ -41,7 +45,7 @@ export default function AnimeCard({
   if (layout === "horizontal") {
     return (
       <Link
-        href={`/anime/${anime.id}`}
+        href={linkHref}
         className={cn(
           "group flex items-center gap-3 rounded-lg p-2 transition-colors hover:bg-[var(--card)]",
           className
@@ -83,7 +87,7 @@ export default function AnimeCard({
   if (layout === "list") {
     return (
       <Link
-        href={`/anime/${anime.id}`}
+        href={linkHref}
         className={cn("group flex gap-3 rounded-lg p-2 transition-all hover:bg-[#1a1d2a]", className)}
       >
         <img
@@ -119,7 +123,7 @@ export default function AnimeCard({
   const badgeSize = compact || medium ? "compact" : "default";
 
   return (
-    <Link href={`/anime/${anime.id}`} className={cn("group block", className)}>
+    <Link href={linkHref} className={cn("group block", className)}>
       <div
         className={cn(
           "relative aspect-[2/3] overflow-hidden bg-[#1a1d28]",
