@@ -56,7 +56,7 @@ function BrowseContent() {
   const fetchResults = useCallback(async (p: number) => {
     setLoading(true);
     try {
-      const cards = await otakubox.search({
+      const rawCards = await otakubox.search({
         q: query.trim() || undefined,
         genre: selectedGenre || undefined,
         type: FORMAT_MAP[selectedFormat] || undefined,
@@ -66,10 +66,11 @@ function BrowseContent() {
         limit: perPage,
       });
 
+      const cards = rawCards.filter((c) => c.anilist_id);
       setResults(cards.map(cardToMedia));
       setSubCounts(cards.map((c) => c.sub_count));
       setDubCounts(cards.map((c) => c.dub_count));
-      setHasNextPage(cards.length >= perPage);
+      setHasNextPage(rawCards.length >= perPage);
     } catch (e) {
       console.error("Browse search failed:", e);
       setResults([]);

@@ -180,7 +180,7 @@ function formatResumeTime(seconds?: number | null) {
 function OtakuRow({ cards }: { cards: OtakuCard[] }) {
   return (
     <HScroll>
-      {cards.map((card) => {
+      {cards.filter((c) => c.anilist_id).map((card) => {
         const media: AnimeMedia = cardToMedia(card);
         return (
           <div key={card.anilist_id} className="w-[140px] shrink-0 sm:w-[160px]">

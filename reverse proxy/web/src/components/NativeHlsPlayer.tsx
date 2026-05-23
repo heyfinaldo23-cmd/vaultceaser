@@ -7,6 +7,8 @@ import {
   Maximize2,
   Pause,
   Play,
+  RotateCcw,
+  RotateCw,
   Settings2,
   Volume2,
   VolumeX,
@@ -575,13 +577,13 @@ const NativeHlsPlayer = forwardRef<NativeHlsPlayerHandle, Props>(function Native
     setCaptionPrefs((prev) => saveCaptionPrefs({ ...prev, ...patch }));
   };
 
-  useImperativeHandle(ref, () => ({
-    seekBy: (delta: number) => {
-      const video = videoRef.current;
-      if (!video) return;
-      video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + delta));
-    },
-  }));
+  const handleSeekBy = (delta: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + delta));
+  };
+
+  useImperativeHandle(ref, () => ({ seekBy: handleSeekBy }));
 
   const progressPercent = durationSeconds ? Math.min(100, Math.max(0, (currentTime / durationSeconds) * 100)) : 0;
 
@@ -777,6 +779,22 @@ const NativeHlsPlayer = forwardRef<NativeHlsPlayerHandle, Props>(function Native
             aria-label={playing ? "Pause" : "Play"}
           >
             {playing ? <Pause className="h-4 w-4 fill-current" /> : <Play className="h-4 w-4 fill-current" />}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSeekBy(-10)}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/65 hover:bg-white/10 hover:text-white"
+            aria-label="Rewind 10 seconds"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSeekBy(10)}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/65 hover:bg-white/10 hover:text-white"
+            aria-label="Forward 10 seconds"
+          >
+            <RotateCw className="h-3.5 w-3.5" />
           </button>
           <span className="w-20 shrink-0 font-mono text-[10px] text-white/65">
             {formatTime(currentTime)} / {formatTime(durationSeconds)}

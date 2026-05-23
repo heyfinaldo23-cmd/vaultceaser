@@ -201,6 +201,7 @@ function WatchPageInner() {
   }, [category, currentEp, megaplayEps, playEpisode]);
 
   const load = useCallback(async () => {
+    if (!id || isNaN(id)) { setLoadError("Invalid anime ID"); setLoading(false); return; }
     setLoading(true);
     setLoadError("");
     setSeasons([]);
@@ -237,8 +238,9 @@ function WatchPageInner() {
       let dubList: EpisodeData[] = [];
 
       if (epRes.status === "fulfilled") {
-        subList = epRes.value.filter((e) => e.has_sub).map(toEpData);
-        dubList = epRes.value.filter((e) => e.has_dub).map(toEpData);
+        // treat missing has_sub as true — API sometimes omits the field
+        subList = epRes.value.filter((e) => e.has_sub !== false).map(toEpData);
+        dubList = epRes.value.filter((e) => e.has_dub === true).map(toEpData);
       }
 
       if (!subList.length && show.episode_count > 0) {
@@ -285,7 +287,7 @@ function WatchPageInner() {
         const latestList = latestCat === "dub" ? (dubList.length ? dubList : subList) : subList;
         const latestEpisode = latest ? latestList.find((ep: EpisodeData) => ep.number === latest.episodeNumber) : null;
         if (latestEpisode) { setCategory(latestCat); setEpisodes(latestList); await playEpisode(latestEpisode, latestCat); }
-        else if (p.autoPlay && playList.length) await playEpisode(playList[0], cat);
+        else if (playList.length) await playEpisode(playList[0], cat);
       }
     } catch (e) {
       console.error(e);

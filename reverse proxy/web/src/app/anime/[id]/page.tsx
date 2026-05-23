@@ -36,6 +36,7 @@ export default function AnimeOverviewPage() {
   const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
+    if (!id || isNaN(id)) { setLoadError("Invalid anime ID"); setLoading(false); return; }
     setLoading(true);
     setLoadError("");
     setSeasons([]);

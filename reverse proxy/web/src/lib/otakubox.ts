@@ -55,6 +55,48 @@ export interface OtakuRelationEdge {
   relationType: string;
 }
 
+// Raw shape returned by /all-relations endpoint
+type RawRelEntry = {
+  relation: string;
+  id: number;
+  title: string;
+  cover?: string;
+  format?: string;
+  status?: string;
+  year?: number;
+  streamable: boolean;
+};
+
+type RawRelItem = {
+  id: number;
+  title: string;
+  cover?: string;
+  format?: string;
+  streamable: boolean;
+  relations: RawRelEntry[];
+};
+
+function parseRelations(raw: RawRelItem[]): { nodes: OtakuRelationNode[]; edges: OtakuRelationEdge[] } {
+  const nodeMap = new Map<number, OtakuRelationNode>();
+  const edges: OtakuRelationEdge[] = [];
+
+  const upsertNode = (id: number, title: string, cover?: string, type?: string, streamable = false) => {
+    if (!nodeMap.has(id)) {
+      nodeMap.set(id, { id, anilist_id: id, custom_id: String(id), title, cover, type, streamable });
+    }
+  };
+
+  for (const item of raw) {
+    upsertNode(item.id, item.title, item.cover, item.format, item.streamable);
+    for (const rel of item.relations || []) {
+      upsertNode(rel.id, rel.title, rel.cover, rel.format, rel.streamable);
+      edges.push({ from: item.id, to: rel.id, relationType: rel.relation });
+    }
+  }
+
+  return { nodes: Array.from(nodeMap.values()), edges };
+}
+
 export interface OtakuSearchParams {
   q?: string;
   genre?: string;
@@ -76,7 +118,8 @@ type ApiRes<T> = ApiOk<T> | ApiErr;
 
 async function get<T>(
   path: string,
-  params?: Record<string, string | number | undefined>
+  params?: Record<string, string | number | undefined>,
+  attempt = 0
 ): Promise<T> {
   const url = new URL(`${BASE}${path}`);
   if (params) {
@@ -85,6 +128,14 @@ async function get<T>(
     }
   }
   const res = await fetch(url.toString(), { cache: "no-store" });
+
+  // Retry on 429 with exponential backoff (max 3 attempts)
+  if (res.status === 429 && attempt < 3) {
+    const delay = (attempt + 1) * 1000;
+    await new Promise((r) => setTimeout(r, delay));
+    return get<T>(path, params, attempt + 1);
+  }
+
   if (!res.ok) throw new Error(`Otakubox ${res.status}: ${path}`);
   const json = (await res.json()) as ApiRes<T>;
   if (!json.ok) throw new Error((json as ApiErr).error || "Otakubox error");
@@ -201,9 +252,8 @@ export const otakubox = {
 
   getEpisodes: (id: number | string) => get<OtakuEpisode[]>(`/episodes/${id}`),
 
-  getAllRelations: (id: number | string, max = 60) =>
-    get<{ nodes: OtakuRelationNode[]; edges: OtakuRelationEdge[] }>(
-      `/all-relations/${id}`,
-      { max }
-    ),
+  getAllRelations: async (id: number | string, max = 60) => {
+    const raw = await get<RawRelItem[]>(`/all-relations/${id}`, { max });
+    return parseRelations(raw);
+  },
 };

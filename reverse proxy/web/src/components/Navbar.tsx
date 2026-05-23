@@ -41,11 +41,14 @@ export default function Navbar() {
     debounce.current = setTimeout(async () => {
       try {
         const hits = await otakubox.getSuggestions(val.trim());
-        const list: SuggestionItem[] = hits.slice(0, 6).map((h) => ({
-          id: h.anilist_id,
-          title: h.title,
-          poster: h.cover,
-        }));
+        const list: SuggestionItem[] = hits
+          .filter((h) => h.anilist_id)
+          .slice(0, 6)
+          .map((h) => ({
+            id: h.anilist_id,
+            title: h.title,
+            poster: h.cover,
+          }));
         setSuggestions(list);
         setOpen(list.length > 0);
       } catch {
