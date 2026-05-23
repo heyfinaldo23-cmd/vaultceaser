@@ -3,95 +3,13 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useAuth } from "@/components/AuthProvider";
-import EpisodeCountBadges from "@/components/EpisodeCountBadges";
+import AnimeCard, { AnimeCardSkeleton } from "@/components/AnimeCard";
 import {
   listQualifiedLocalWatchProgress,
   type LocalWatchProgress,
 } from "@/lib/watch-progress";
-import {
-  akFetchHome,
-  akFetchLatestUpdated,
-  akFetchNewRelease,
-  type AkHomeFeed,
-} from "@/lib/anikoto-cache";
-import type { AkHomeItem, AkFilterItem } from "@/lib/anikoto";
-
-// ─── nekos.best loading banner ────────────────────────────────────────────────
-
-const NEKOS_CATS = ["nod", "wave", "think", "happy", "smile", "bored"];
-
-function NekosLoadingBanner() {
-  const [gifUrl, setGifUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    const cat = NEKOS_CATS[Math.floor(Math.random() * NEKOS_CATS.length)];
-    fetch(`https://nekos.best/api/v2/${cat}?amount=1`)
-      .then((r) => r.json())
-      .then((d) => {
-        const url = d?.results?.[0]?.url as string | undefined;
-        if (url) setGifUrl(url);
-      })
-      .catch(() => null);
-  }, []);
-
-  return (
-    <div className="flex items-center gap-4 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-      {gifUrl ? (
-        <img src={gifUrl} alt="loading" className="h-16 w-16 rounded-lg object-cover" />
-      ) : (
-        <div className="h-16 w-16 rounded-lg skeleton shrink-0" />
-      )}
-      <div>
-        <p className="font-mono text-sm font-bold text-white">Fetching latest anime…</p>
-        <p className="font-mono text-xs text-[var(--muted)]">Grabbing fresh data from Anikoto</p>
-      </div>
-    </div>
-  );
-}
-
-// ─── card for Anikoto items ───────────────────────────────────────────────────
-
-function AkCard({ item, epNum }: { item: AkHomeItem | AkFilterItem; epNum?: string }) {
-  const slug = item.slug;
-  const href = slug ? `/anime/ak/${slug}` : "#";
-  const num = epNum ?? (item as AkHomeItem).href?.match(/\/ep-(\d+)/)?.[1];
-
-  return (
-    <Link href={href} className="group block w-[160px] shrink-0">
-      <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-[#1a1d28]">
-        {item.poster ? (
-          <img
-            src={item.poster}
-            alt={item.title}
-            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
-            loading="lazy"
-            onError={(e) => {
-              (e.target as HTMLImageElement).src = "/placeholder.svg";
-            }}
-          />
-        ) : (
-          <div className="h-full w-full bg-[#1a1d28]" />
-        )}
-        {num && (
-          <span className="absolute right-1.5 top-1.5 rounded bg-[#e8621a] px-1.5 py-0.5 font-mono text-[9px] font-bold text-white">
-            EP {num}
-          </span>
-        )}
-      </div>
-      <h3 className="mt-1.5 line-clamp-2 font-mono text-[12px] font-bold leading-tight text-white group-hover:text-[#e8621a]">
-        {item.title}
-      </h3>
-      <EpisodeCountBadges
-        subCount={item.subCount}
-        dubCount={item.dubCount}
-        total={item.totalCount ?? undefined}
-        format={item.type || "TV"}
-        size="compact"
-        className="mt-0.5"
-      />
-    </Link>
-  );
-}
+import { otakubox, cardToMedia, type OtakuCard } from "@/lib/otakubox";
+import type { AnimeMedia } from "@/lib/api";
 
 // ─── cute grill widget ────────────────────────────────────────────────────────
 
@@ -257,21 +175,50 @@ function formatResumeTime(seconds?: number | null) {
   return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
+// ─── Otakubox card row ────────────────────────────────────────────────────────
+
+function OtakuRow({ cards }: { cards: OtakuCard[] }) {
+  return (
+    <HScroll>
+      {cards.map((card) => {
+        const media: AnimeMedia = cardToMedia(card);
+        return (
+          <div key={card.anilist_id} className="w-[140px] shrink-0 sm:w-[160px]">
+            <AnimeCard
+              anime={media}
+              size="compact"
+              subCount={card.sub_count}
+              dubCount={card.dub_count}
+            />
+          </div>
+        );
+      })}
+    </HScroll>
+  );
+}
+
+function OtakuRowSkeleton() {
+  return (
+    <div className="flex gap-2 overflow-hidden pb-2">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} className="w-[140px] shrink-0 sm:w-[160px]">
+          <AnimeCardSkeleton />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
   const { user } = useAuth();
   const [continueList, setContinueList] = useState<ContinueItem[]>([]);
 
-  const [akFeed, setAkFeed] = useState<AkHomeFeed | null>(null);
-  const [latestItems, setLatestItems] = useState<AkFilterItem[]>([]);
-  const [newReleases, setNewReleases] = useState<AkFilterItem[]>([]);
-
-  const [feedLoading, setFeedLoading] = useState(true);
-  const [latestLoading, setLatestLoading] = useState(true);
-  const [newLoading, setNewLoading] = useState(true);
-
-  const anyLoading = feedLoading || latestLoading || newLoading;
+  const [trending, setTrending] = useState<OtakuCard[]>([]);
+  const [recent, setRecent] = useState<OtakuCard[]>([]);
+  const [trendingLoading, setTrendingLoading] = useState(true);
+  const [recentLoading, setRecentLoading] = useState(true);
 
   const resolve = useCallback(async () => {
     setContinueList(mergeContinueItems(listQualifiedLocalWatchProgress(6).map(localWatchToContinueItem)).slice(0, 6));
@@ -280,32 +227,15 @@ export default function HomePage() {
   useEffect(() => {
     resolve();
 
-    (async () => {
-      try {
-        const feed = await akFetchHome();
-        setAkFeed(feed);
-      } catch { /* non-critical */ } finally {
-        setFeedLoading(false);
-      }
-    })();
+    otakubox.getTrending(1, 20)
+      .then(setTrending)
+      .catch(() => {})
+      .finally(() => setTrendingLoading(false));
 
-    (async () => {
-      try {
-        const items = await akFetchLatestUpdated(20);
-        setLatestItems(items);
-      } catch { /* non-critical */ } finally {
-        setLatestLoading(false);
-      }
-    })();
-
-    (async () => {
-      try {
-        const items = await akFetchNewRelease(16);
-        setNewReleases(items);
-      } catch { /* non-critical */ } finally {
-        setNewLoading(false);
-      }
-    })();
+    otakubox.getRecent(1, 20)
+      .then(setRecent)
+      .catch(() => {})
+      .finally(() => setRecentLoading(false));
   }, [resolve, user]);
 
   return (
@@ -344,50 +274,17 @@ export default function HomePage() {
             </section>
           )}
 
-          {/* Loading banner — nekos.best gif while any section is loading */}
-          {anyLoading && <NekosLoadingBanner />}
+          {/* Trending */}
+          <section>
+            <SectionHeader title="Trending" href="/browse?sort=score" />
+            {trendingLoading ? <OtakuRowSkeleton /> : <OtakuRow cards={trending} />}
+          </section>
 
-          {/* Trending — Anikoto top anime of the day */}
-          {!feedLoading && (
-            <section>
-              <SectionHeader title="Trending" href="/browse?sort=POPULARITY_DESC" />
-              {akFeed?.topAnime?.length ? (
-                <HScroll>
-                  {akFeed.topAnime.slice(0, 12).map((item, i) => (
-                    <AkCard key={`top-${item.slug}-${i}`} item={item} />
-                  ))}
-                </HScroll>
-              ) : null}
-            </section>
-          )}
-
-          {/* Latest Episodes — from /latest-updated */}
-          {!latestLoading && (
-            <section>
-              <SectionHeader title="Latest Episodes" href="/browse?sort=UPDATED_AT_DESC" />
-              {latestItems.length > 0 && (
-                <HScroll>
-                  {latestItems.map((item, i) => (
-                    <AkCard key={`latest-${item.slug}-${i}`} item={item} />
-                  ))}
-                </HScroll>
-              )}
-            </section>
-          )}
-
-          {/* New Releases — from /new-release */}
-          {!newLoading && (
-            <section>
-              <SectionHeader title="New Releases" href="/browse?sort=START_DATE_DESC" />
-              {newReleases.length > 0 && (
-                <HScroll>
-                  {newReleases.map((item, i) => (
-                    <AkCard key={`new-${item.slug}-${i}`} item={item} />
-                  ))}
-                </HScroll>
-              )}
-            </section>
-          )}
+          {/* Recent */}
+          <section>
+            <SectionHeader title="Recently Updated" href="/browse?sort=recent" />
+            {recentLoading ? <OtakuRowSkeleton /> : <OtakuRow cards={recent} />}
+          </section>
 
           {/* A-Z Browse */}
           <section><AZBrowse /></section>

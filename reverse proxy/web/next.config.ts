@@ -12,6 +12,7 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: path.join(__dirname),
   async rewrites() {
     return [
+      // Static assets from Python backend (synthetic player, etc.)
       {
         source: "/static/:path*",
         destination: `${BACKEND}/static/:path*`,

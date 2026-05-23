@@ -6,21 +6,17 @@ import Link from "next/link";
 import { Bookmark } from "lucide-react";
 import GenreChips from "@/components/GenreChips";
 import EpisodeCountBadges from "@/components/EpisodeCountBadges";
-import NativeHlsPlayer, { type NativePlayerProgress } from "@/components/NativeHlsPlayer";
+import NativeHlsPlayer, { type NativePlayerProgress, type NativeHlsPlayerHandle } from "@/components/NativeHlsPlayer";
 import PlayerToolbar from "@/components/PlayerToolbar";
 import SeasonRail, { type SeasonEntry } from "@/components/SeasonRail";
-import SimilarCarousel from "@/components/SimilarCarousel";
-import { api, type AnimeMedia, type EpisodeData, normalizeScore, mediaYear } from "@/lib/api";
-import { isBlockedAnime, filterAnimeList } from "@/lib/anime-filters";
+import { type AnimeMedia, type EpisodeData, normalizeScore, mediaYear } from "@/lib/api";
+import { isBlockedAnime } from "@/lib/anime-filters";
 import { formatLabel } from "@/lib/format-labels";
 import { animeTitle } from "@/lib/anime-title";
 import { clientApi } from "@/lib/client-api";
 import { useAuth } from "@/components/AuthProvider";
 import { loadPlayerPrefs, savePlayerPrefs, type PlayerPrefs } from "@/lib/player-prefs";
-import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
-import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
-import { getAnikotoEpCounts, getCachedEpCounts, getCachedSlug, akFetchEpisodeList } from "@/lib/anikoto-cache";
-import type { AkEpisodeEntry } from "@/lib/anikoto";
+import { otakubox, cardToMedia, buildSeasonChain, findNextInChain, type OtakuEpisode } from "@/lib/otakubox";
 import {
   getLatestLocalWatchForAnime,
   getLocalWatchProgress,
@@ -43,7 +39,6 @@ function WatchPageInner() {
   const [anime, setAnime] = useState<AnimeMedia | null>(null);
   const [episodes, setEpisodes] = useState<EpisodeData[]>([]);
   const [epCounts, setEpCounts] = useState<EpCounts>({ sub: 0, dub: 0 });
-  const [recs, setRecs] = useState<AnimeMedia[]>([]);
   const [seasons, setSeasons] = useState<SeasonEntry[]>([]);
   const [category, setCategory] = useState<"sub" | "dub">(
     searchParams.get("cat") === "dub" ? "dub" : "sub"
@@ -70,6 +65,7 @@ function WatchPageInner() {
   const prefsRef = useRef<PlayerPrefs>(prefs);
   const userRef = useRef(user);
   const playerShellRef = useRef<HTMLDivElement>(null);
+  const playerRef = useRef<NativeHlsPlayerHandle>(null);
   const lastPlayerTimeRef = useRef(0);
   const lastPlayerRawTimeRef = useRef(0);
   const lastTickAtRef = useRef(0);
@@ -189,7 +185,7 @@ function WatchPageInner() {
     lastSyncedProgressRef.current = "";
     playerCanReportRef.current = false;
 
-    setPlayerSourceId(`mal:${id}:${ep.number}`);
+    setPlayerSourceId(ep.id);
   }, [clearAutoNextTimers, id]);
 
   const selectCategory = useCallback((nextCategory: "sub" | "dub") => {
@@ -208,145 +204,75 @@ function WatchPageInner() {
     setLoading(true);
     setLoadError("");
     setSeasons([]);
-    setRecs([]);
 
-    // Show cached Anikoto counts immediately
-    const preCached = getCachedEpCounts(id);
-    if (preCached && (preCached.sub > 0 || preCached.dub > 0)) {
-      setEpCounts(preCached);
-    }
+    const toEpData = (ep: OtakuEpisode): EpisodeData => ({
+      id: ep.id,
+      number: parseInt(ep.episode_num) || 0,
+      title: ep.title || `Episode ${ep.episode_num}`,
+      original_id: ep.id,
+    });
 
-    // If anikotoId is cached, fetch episode list in parallel with main load
-    const cachedSlug = getCachedSlug(id);
-    const akParallelPromise = cachedSlug
-      ? akFetchEpisodeList(cachedSlug.anikotoId).catch(() => null)
-      : Promise.resolve(null);
-
-    const [detailRes, recRes, akParallelRes] = await Promise.allSettled([
-      api.getAnime(id),
-      api.getRecommendations(id, 1, 12),
-      akParallelPromise,
+    const [detailRes, epRes, relRes] = await Promise.allSettled([
+      otakubox.getShow(id),
+      otakubox.getEpisodes(id),
+      otakubox.getAllRelations(id),
     ]);
 
     if (detailRes.status === "rejected") {
-      setLoadError(detailRes.reason instanceof Error ? detailRes.reason.message : "Anime not found");
+      setLoadError("Anime not found");
       setAnime(null);
       setLoading(false);
       return;
     }
 
     try {
-      const info = detailRes.value.info;
-      if (isBlockedAnime(info)) { router.replace("/browse"); return; }
-      setAnime(info);
+      const show = detailRes.value;
+      const media = cardToMedia(show);
+      if (isBlockedAnime(media)) { router.replace("/browse"); return; }
+      setAnime(media);
 
-      // Build episode lists from Anikoto data
+      setEpCounts({ sub: show.sub_count, dub: show.dub_count });
+
       let subList: EpisodeData[] = [];
       let dubList: EpisodeData[] = [];
 
-      const toEpData = (entries: AkEpisodeEntry[]): EpisodeData[] =>
-        entries.map((e) => ({
-          id: `mal:${id}:${e.num}`,
-          number: e.num,
-          title: e.title || `Episode ${e.num}`,
-        }));
-
-      if (akParallelRes.status === "fulfilled" && akParallelRes.value) {
-        const ak = akParallelRes.value;
-        subList = toEpData(ak.episodes.filter((e) => e.hasSub));
-        dubList = toEpData(ak.episodes.filter((e) => e.hasDub));
+      if (epRes.status === "fulfilled") {
+        subList = epRes.value.filter((e) => e.has_sub).map(toEpData);
+        dubList = epRes.value.filter((e) => e.has_dub).map(toEpData);
       }
 
-      // Synthetic fallback from total episode count (first visit, no cached slug yet)
-      const totalEps = info.episodes ?? 0;
-      if (!subList.length && totalEps > 0) {
-        subList = Array.from({ length: totalEps }, (_, i) => ({
-          id: `mal:${id}:${i + 1}`,
+      if (!subList.length && show.episode_count > 0) {
+        subList = Array.from({ length: show.episode_count }, (_, i) => ({
+          id: `ani:${id}:${i + 1}`,
           number: i + 1,
           title: `Episode ${i + 1}`,
+          original_id: `ani:${id}:${i + 1}`,
         }));
       }
 
-      let subN = subList.length;
-      let dubN = dubList.length;
-
       setMegaplayEps({ sub: subList, dub: dubList.length ? dubList : subList });
-      setEpCounts({ sub: subN, dub: dubN });
-      if (subN > 0 || dubN > 0) rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
 
-      // First visit (no cached slug): resolve in background
-      if (!cachedSlug) {
-        const titleStr = animeTitle(info);
-        getAnikotoEpCounts(id, titleStr).then((akCounts) => {
-          if (!akCounts) return;
-          setEpCounts((prev) => {
-            const s = Math.max(prev.sub, akCounts.sub);
-            const d = Math.max(prev.dub, akCounts.dub);
-            if (s === prev.sub && d === prev.dub) return prev;
-            rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
-            return { sub: s, dub: d };
-          });
-          // Also build synthetic dub list if we now know there's dub
-          if (akCounts.dub > 0 && dubList.length === 0) {
-            const synthDub: EpisodeData[] = Array.from({ length: akCounts.dub }, (_, i) => ({
-              id: `mal:${id}:${i + 1}`,
-              number: i + 1,
-              title: `Episode ${i + 1}`,
-            }));
-            setMegaplayEps((prev) => prev ? { ...prev, dub: synthDub } : prev);
-          }
-          // Reload episode list with real Anikoto data once slug resolved
-          const resolvedSlug = getCachedSlug(id);
-          if (resolvedSlug) {
-            akFetchEpisodeList(resolvedSlug.anikotoId).then((fresh) => {
-              if (!fresh) return;
-              const freshSub = toEpData(fresh.episodes.filter((e) => e.hasSub));
-              const freshDub = toEpData(fresh.episodes.filter((e) => e.hasDub));
-              if (freshSub.length) {
-                setMegaplayEps({ sub: freshSub, dub: freshDub.length ? freshDub : freshSub });
-                setEpCounts({ sub: freshSub.length, dub: freshDub.length });
-                rememberEpisodeCounts({ [id]: { sub: freshSub.length, dub: freshDub.length } });
-              }
-            }).catch(() => {});
-          }
-        }).catch(() => {});
+      if (relRes.status === "fulfilled") {
+        const { nodes, edges } = relRes.value;
+        const chainNodes = buildSeasonChain(id, nodes, edges);
+        if (chainNodes.length > 1) {
+          const nextId = findNextInChain(id, edges);
+          setSeasons(chainNodes.map((n) => ({
+            id: n.anilist_id,
+            label: n.title,
+            title: n.title,
+            image: n.cover,
+            format: n.type,
+            isCurrent: n.anilist_id === id,
+            isNext: n.anilist_id === nextId,
+          })));
+        }
       }
 
       const cat = searchParams.get("cat") === "dub" ? "dub" : "sub";
       const playList = cat === "dub" ? (dubList.length ? dubList : subList) : subList;
       setCategory(cat);
       setEpisodes(playList);
-
-      if (recRes.status === "fulfilled") {
-        setRecs(filterAnimeList((recRes.value.recommendations || []).map((r) => r.mediaRecommendation).filter(Boolean)));
-      }
-
-      // BFS through relations for season rail
-      const allEdges = [...(info.relations?.edges || [])];
-      const seen = new Set<number>([id]);
-      for (const e of allEdges) if (e.node?.id) seen.add(e.node.id);
-      let frontier = allEdges.filter((e) => ["SEQUEL", "PREQUEL"].includes(e.relationType || "") && e.node?.id).map((e) => e.node!.id);
-      for (let hop = 0; hop < 4 && frontier.length > 0; hop++) {
-        const fetches = await Promise.allSettled(frontier.map((rid) => api.getRelations(rid)));
-        const nextFrontier: number[] = [];
-        for (const res of fetches) {
-          if (res.status !== "fulfilled") continue;
-          const edges = res.value.relations as NonNullable<typeof info.relations>["edges"];
-          if (!Array.isArray(edges)) continue;
-          for (const edge of edges) {
-            if (!edge?.node?.id || seen.has(edge.node.id)) continue;
-            seen.add(edge.node.id);
-            allEdges.push(edge);
-            if (["SEQUEL", "PREQUEL"].includes(edge.relationType || "")) nextFrontier.push(edge.node.id);
-          }
-        }
-        frontier = nextFrontier;
-      }
-      const fullSeasons = buildSeasonList(info, { edges: allEdges });
-      if (fullSeasons.length) {
-        const seasonCounts = await fetchEpisodeCounts(fullSeasons.map((s) => s.id));
-        setSeasons(enrichSeasonCounts(fullSeasons, { ...seasonCounts, [id]: { sub: subN, dub: dubN } }));
-      }
 
       const epNum = Number(searchParams.get("ep"));
       const p = loadPlayerPrefs();
@@ -543,6 +469,7 @@ function WatchPageInner() {
             >
               {playerSourceId ? (
                 <NativeHlsPlayer
+                  ref={playerRef}
                   sourceId={playerSourceId}
                   category={category}
                   resumeAt={resumeAt}
@@ -639,6 +566,8 @@ function WatchPageInner() {
                 onNext={goNext}
                 hasPrev={hasPrev}
                 hasNext={hasNext}
+                onSeekBack={() => playerRef.current?.seekBy(-10)}
+                onSeekForward={() => playerRef.current?.seekBy(10)}
               />
             </div>
           </div>
@@ -723,7 +652,6 @@ function WatchPageInner() {
           </section>
         )}
         <SeasonRail seasons={seasons} currentId={id} />
-        <SimilarCarousel items={recs} />
       </div>
 
       {dimChrome && (

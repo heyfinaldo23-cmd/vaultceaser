@@ -8,6 +8,8 @@ import {
   Scissors,
   SkipBack,
   SkipForward,
+  RotateCcw,
+  RotateCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PlayerPrefs } from "@/lib/player-prefs";
@@ -21,6 +23,8 @@ type Props = {
   onNext?: () => void;
   hasPrev?: boolean;
   hasNext?: boolean;
+  onSeekBack?: () => void;
+  onSeekForward?: () => void;
 };
 
 function Btn({
@@ -68,6 +72,8 @@ export default function PlayerToolbar({
   onNext,
   hasPrev,
   hasNext,
+  onSeekBack,
+  onSeekForward,
 }: Props) {
   return (
     <div
@@ -108,6 +114,9 @@ export default function PlayerToolbar({
           active={prefs.autoSkip}
           onClick={() => onToggle("autoSkip")}
         />
+        <span className="mx-0.5 hidden h-7 w-px bg-white/10 sm:block" />
+        <Btn icon={RotateCcw} label="-10s" onClick={onSeekBack} disabled={!onSeekBack} />
+        <Btn icon={RotateCw} label="+10s" onClick={onSeekForward} disabled={!onSeekForward} />
         <span className="mx-0.5 hidden h-7 w-px bg-white/10 sm:block" />
         <Btn icon={SkipBack} label="Prev" onClick={onPrev} disabled={!hasPrev} />
         <Btn icon={SkipForward} label="Next" onClick={onNext} disabled={!hasNext} />

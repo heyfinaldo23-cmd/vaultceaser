@@ -1,0 +1,493 @@
+# Otakubox — llms.txt
+# Complete technical reference for AI agents and web integration.
+# Worker URL: https://otakubox.otakuboxapi.workers.dev
+# Last updated: 2026-05-23
+
+---
+
+## Quick integration reference
+
+Base URL: https://otakubox.otakuboxapi.workers.dev
+All responses: JSON with { ok: true, data: ... } or { ok: false, error: "...", status: N }
+All routes: GET only (except /admin/* which also accepts POST)
+CORS: Access-Control-Allow-Origin: * — safe to call from any browser or server
+
+---
+
+## Web integration — copy-paste examples
+
+### Embed a stream in your page (iframe)
+
+```html
+<!-- Sub stream for AniList show ID 173172 episode 1 -->
+<iframe
+  src="https://otakubox.otakuboxapi.workers.dev/api/stream/173172/1/sub"
+  allow="autoplay; fullscreen; encrypted-media"
+  style="width:100%;aspect-ratio:16/9;border:none"
+></iframe>
+```
+
+The iframe serves a complete self-contained hls.js player page with:
+- Skip Intro / Skip Outro buttons (when metadata is available)
+- Subtitle track loaded automatically
+- Quality selector via hls.js level API
+- Works in any browser (hls.js handles HLS natively where unsupported)
+
+### Fetch episodes + stream with NativeHlsPlayer / hls.js
+
+```javascript
+// Step 1: get episode list (each episode has an id field)
+const { data: episodes } = await fetch(
+  "https://otakubox.otakuboxapi.workers.dev/episodes/173172"
+).then(r => r.json());
+// episodes[0] = { id: "ani:173172:1", episode_num: "1", title: "...", has_sub: true, has_dub: true }
+
+// Step 2: when user picks episode 1 sub, call getSources
+const sources = await fetch(
+  "https://otakubox.otakuboxapi.workers.dev/api/mp/stream/getSources" +
+  "?id=ani:173172:1&category=sub"
+).then(r => r.json());
+// {
+//   sources: [{ file: "https://otakubox.../api/cdn-hls?u=...master.m3u8" }],
+//   tracks:  [{ file: "...vtt...", label: "English", kind: "captions", srclang: "en", default: true }],
+//   intro:   { start: 0, end: 89 },
+//   outro:   { start: 1351, end: 1440 }
+// }
+
+// Step 3: feed into hls.js directly
+const hls = new Hls();
+hls.loadSource(sources.sources[0].file);
+hls.attachMedia(videoElement);
+// subtitle track
+if (sources.tracks[0]) {
+  const track = document.createElement("track");
+  track.src     = sources.tracks[0].file;
+  track.kind    = sources.tracks[0].kind;
+  track.srclang = sources.tracks[0].srclang;
+  track.label   = sources.tracks[0].label;
+  track.default = true;
+  videoElement.appendChild(track);
+}
+```
+
+The m3u8 URL is pre-proxied through /api/cdn-hls — all CDN referer protection is handled
+server-side. No CORS issues. No additional configuration needed.
+
+### Search
+
+```javascript
+const res = await fetch(
+  "https://otakubox.otakuboxapi.workers.dev/search?q=one+piece&genre=Action&lang=sub&sort=score"
+);
+const { data, total, page } = await res.json();
+```
+
+### Autocomplete / suggestions
+
+```javascript
+const res = await fetch(
+  "https://otakubox.otakuboxapi.workers.dev/suggestions?q=narut"
+);
+const { data } = await res.json();
+// Returns up to 8 lightweight hits: { custom_id, anilist_id, title, cover }
+```
+
+### Show detail + episode list
+
+```javascript
+// Works with either anilist_id (number) or custom_id (string like "ani_21")
+const show = await fetch("https://otakubox.otakuboxapi.workers.dev/show/21").then(r => r.json());
+const eps  = await fetch("https://otakubox.otakuboxapi.workers.dev/episodes/21").then(r => r.json());
+```
+
+### Determine stream URL
+
+```
+/api/stream/{anilist_id}/{episode_num}/{sub|dub}
+/api/stream/custom/{custom_id}/{episode_num}/{sub|dub}
+```
+
+For normal shows use the anilist_id. For custom shows (is_custom=1) use the custom_id string.
+
+---
+
+## Card object shape
+
+All list/search routes return cards with at minimum these fields:
+
+```json
+{
+  "id":          8593,
+  "custom_id":   "ani_21",
+  "anilist_id":  21,
+  "title":       "One Piece",
+  "cover":       "https://s4.anilist.co/file/anilistcdn/...",
+  "banner":      "https://s4.anilist.co/file/anilistcdn/...",
+  "year":        1999,
+  "season":      "Fall",
+  "type":        "TV",
+  "status":      "Currently Airing",
+  "genres":      ["Action", "Adventure", "Fantasy"],
+  "score":       8.7,
+  "sub_count":   1130,
+  "dub_count":   1130,
+  "episode_count": 1130,
+  "streamable":  true
+}
+```
+
+Show detail (/show/:id) additionally includes:
+- `description` — HTML synopsis from AniList
+- `studios` — array of studio names
+- `next_airing` — { episode, timeUntilAiring } or null
+- `synonyms` — alternate titles array
+- `anikoto_id` — internal scraper ID (used for episode list)
+
+---
+
+## All Worker routes
+
+### GET /
+Serves the embedded demo web app (HTML/CSS/JS, no external dependencies).
+
+### GET /trending?page=1&limit=30
+AniList trending → filtered to only shows present in D1 (streamable content).
+Response: { ok, data: Card[], page, total }
+
+### GET /season?year=2026&season=SPRING&page=1&limit=20
+AniList seasonal anime. season: WINTER | SPRING | SUMMER | FALL (uppercase).
+Filters to streamable shows only.
+
+### GET /search?q=&genre=&year=&season=&type=&status=&lang=&sort=&page=1&limit=20
+Entirely D1-powered. No AniList call. Supports:
+- q: full-text search (FTS5 on title + slug)
+- genre: comma-separated, AND logic ("Action,Isekai")
+- year: integer
+- season: Winter | Spring | Summer | Fall
+- type: TV | Movie | OVA | ONA
+- status: "Currently Airing" | "Completed" | "Not yet aired"
+- lang: sub | dub (filters sub_count>0 or dub_count>0)
+- sort: score | title | year | recent (default: score)
+Response: { ok, data: Card[], total, page, limit }
+
+### GET /suggestions?q=
+D1 prefix search. Returns up to 8 lightweight results for autocomplete.
+Response: { ok, data: [{ custom_id, anilist_id, title, cover }] }
+
+### GET /recent?page=1&limit=20
+Latest updated shows. Tries anikotoapi /recent-anime first (cached 30s), falls back to D1.
+Response: { ok, data: Card[] }
+
+### GET /genres
+All distinct genre values extracted from D1.
+Response: { ok, data: string[] }
+
+### GET /show/:id
+:id = numeric anilist_id OR custom_id string (e.g. "ani_21", "custom_8719").
+AniList detail (cached 5min) merged with D1 overlay.
+Custom shows return D1-only data (no AniList call).
+Response: { ok, data: { ...Card, description, studios, next_airing, synonyms, anikoto_id } }
+
+### GET /episodes/:id  —  also GET /episodes?anilistId={id}
+:id = numeric anilist_id or custom_id string ("custom_8719"). Query param ?anilistId= also accepted.
+Custom shows: returns D1 episodes table rows.
+AniList shows: fetches anikotoapi /series/{anikoto_id} (cached 1hr).
+Each episode includes an `id` field for passing directly to /api/mp/stream/getSources.
+Response: { ok, data: [{ id, episode_num, title, has_sub, has_dub }], anikoto_id? }
+
+Episode id field formats:
+  "ani:{anilist_id}:{episode_num}"  — normal show, e.g. "ani:173172:1"
+  "s2:{db_row_id}:{episode_num}"    — custom show, e.g. "s2:8593:1"
+
+### GET /api/mp/stream/getSources?id={episodeId}&category={sub|dub}
+Primary endpoint for frontend players (NativeHlsPlayer / hls.js integration).
+Accepts the episode id from /episodes and the desired category (sub or dub).
+Performs the full server-side megaplay extraction flow and returns ready-to-use JSON.
+
+Request:
+  GET /api/mp/stream/getSources?id=ani:173172:1&category=sub
+
+Response shape:
+  {
+    "sources": [{ "file": "https://otakubox.../api/cdn-hls?u=...master.m3u8..." }],
+    "tracks":  [{ "file": "...proxied-vtt...", "label": "English", "kind": "captions",
+                  "srclang": "en", "default": true }],
+    "intro":   { "start": 0, "end": 89 },     // omitted if unavailable
+    "outro":   { "start": 1351, "end": 1440 } // omitted if unavailable
+  }
+
+Notes:
+- sources is always an array (never a plain object), even when there's only one source.
+- All video and subtitle URLs are pre-proxied through /api/cdn-hls. Feed directly to hls.js.
+- On error: { "error": "human readable message" } with appropriate HTTP status.
+- CORS: Access-Control-Allow-Origin: * always present.
+- Does NOT cache — stream URLs are short-lived signed tokens.
+
+### GET /all-relations/:id?max=40
+Recursive AniList relation graph. BFS traversal up to max nodes (default 40, hard cap 80).
+Tags each node with streamable: true|false from D1.
+Response: { ok, data: { nodes: [...], edges: [...] } }
+
+### GET /api/stream/:anilistId/:ep/:lang
+Returns a self-contained HTML player page (not JSON). For iframe embedding.
+Same extraction flow as /api/mp/stream/getSources but renders a full hls.js player page.
+On missing content: fires Discord webhook, returns 404 JSON.
+
+### GET /api/stream/custom/:customId/:ep/:lang
+Same HTML player as above, but for custom shows. Looks up episode_id from D1.
+Returns 404 JSON if no episode_id for the requested lang.
+
+### GET /api/cdn-hls?u={encoded_url}&r={encoded_referer}
+CDN HLS proxy. Fetches target URL with correct Referer (default: https://megaplay.buzz/).
+.m3u8: recursively rewrites all segment/variant/key URIs to go through this proxy.
+Binary segments: streamed through as-is.
+Allowed root domains (any subdomain accepted via suffix match):
+  mewstream.buzz, streamzone1.site, flarestorm.buzz, glimmeron.click,
+  sparqle.click, orbitra.click, cinewave2.site, lostproject.club,
+  vidwish.live, megaplay.buzz, jwpcdn.com, watching.onl, cloudbuzz.lol,
+  livedns.my, ultracloud.cc
+Returns 403 { ok:false, error:"host not allowed: ..." } for unknown hosts.
+
+### GET /api/mp/:path*
+Proxies Megaplay HTML/CSS/JS assets. Rewrites absolute URLs to stay within proxy.
+Allowed hosts: megaplay.buzz, vidwish.live.
+Note: /api/mp/stream/getSources is intercepted BEFORE this wildcard and handled separately.
+
+### GET /admin/anime
+Lists all custom shows. Requires: Authorization: Bearer {ADMIN_TOKEN}
+
+### POST /admin/anime
+Add a custom show (one not in AniList).
+Body: { anikoto_id: number, title: string, cover?, banner?, synopsis?, genres?: string[], sub_count?, dub_count? }
+Auto-fetches anikotoapi metadata if cover/synopsis not provided.
+Sets is_custom=1. Generates custom_id = "custom_{anikoto_id}".
+Requires: Authorization: Bearer {ADMIN_TOKEN}
+
+### POST /admin/anime/:customId/eps
+Add episodes to a custom show.
+Body: [{ episode_num: string, sub_episode_id?: string, dub_episode_id?: string, title?: string }]
+episode_id values come from anikotoapi /series/{id} → episodes[].embed_id
+Requires: Authorization: Bearer {ADMIN_TOKEN}
+
+### GET /llms.txt
+Returns this file.
+
+---
+
+## Project overview
+
+Otakubox is an anime streaming API and web frontend:
+- Cloudflare Worker (https://otakubox.otakuboxapi.workers.dev) serves all HTTP
+- Cloudflare D1 (SQLite) holds the scraped catalogue (~8821 shows)
+- AniList GraphQL provides live metadata (trending, detail, relations)
+- Megaplay (megaplay.buzz) provides actual video streams
+- /api/cdn-hls proxies video segments to bypass CDN referer protection
+- Node.js + cloudflared tunnel on Windows forwards AniList requests from a home IP
+- Go scraper/tracker populates and maintains D1 from anikotoapi.site
+
+---
+
+## Repository layout
+
+```
+otakubox/
+├── README.md
+├── llms.txt                     This file
+├── AGENTS.md
+├── worker/
+│   ├── wrangler.toml            D1 binding, secrets docs, compatibility_date
+│   ├── package.json
+│   └── src/
+│       ├── index.js             Router, CORS, timing, global error handler, DEMO_HTML
+│       ├── routes/
+│       │   ├── browse.js        /trending /season /search /suggestions /recent /genres
+│       │   ├── show.js          /show/:id /episodes/:id /all-relations/:id
+│       │   ├── stream.js        /api/stream/* (HTML player) + /api/mp/stream/getSources (JSON)
+│       │   ├── cdn.js           /api/cdn-hls — CDN HLS proxy with m3u8 URL rewriting
+│       │   ├── admin.js         POST /admin/anime and /admin/anime/:id/eps
+│       │   └── proxy.js         /api/mp/* Megaplay asset rewrite
+│       └── lib/
+│           ├── d1.js            All D1 queries
+│           ├── anilist.js       AniList GraphQL client + query strings
+│           ├── cache.js         CF Cache API wrapper
+│           └── discord.js       notifyMiss() webhook
+├── scraper/
+│   ├── go.mod
+│   ├── cmd/
+│   │   ├── scrape/main.go       Full one-time scrape
+│   │   ├── track/main.go        Incremental tracker daemon (auto-pushes to D1)
+│   │   └── push/main.go         SQL dump generator + D1 push
+│   ├── internal/
+│   │   ├── anikoto/client.go    HTTP client with rate limiting + retry
+│   │   └── store/
+│   │       ├── schema.go        DDL
+│   │       ├── models.go        Go structs
+│   │       └── sqlite.go        DB operations
+│   └── data/                    anime.db (gitignored)
+├── proxy/
+│   ├── server.js                Node.js AniList proxy (port 4191)
+│   └── start.ps1                Starts proxy + cloudflared
+└── docs/
+    └── arch.html                Architecture diagram
+```
+
+---
+
+## D1 Database schema
+
+### Table: anime
+```sql
+id            INTEGER PRIMARY KEY   -- anikoto series id
+custom_id     TEXT UNIQUE           -- "ani_{anilist_id}" or "custom_{anikoto_id}"
+anilist_id    INTEGER UNIQUE        -- AniList media ID, NULL for custom shows
+mal_id        INTEGER
+title         TEXT
+slug          TEXT
+status        TEXT                  -- "Currently Airing" | "Completed" | "Not yet aired"
+type          TEXT                  -- "TV" | "ONA" | "Movie" | "OVA"
+year          INTEGER
+season        TEXT                  -- "Winter" | "Spring" | "Summer" | "Fall"
+cover         TEXT
+banner        TEXT
+synopsis      TEXT
+genres        TEXT                  -- JSON array string: '["Action","Isekai"]'
+studios       TEXT                  -- JSON array string: '["MAPPA"]'
+score         REAL
+episode_count INTEGER
+sub_count     INTEGER DEFAULT 0
+dub_count     INTEGER DEFAULT 0
+is_custom     BOOLEAN DEFAULT 0
+updated_at    TEXT
+scraped_at    TEXT
+```
+
+### Table: episodes (custom shows only)
+```sql
+anime_id        INTEGER   -- FK → anime.id
+episode_num     TEXT      -- "1", "OVA 1"
+title           TEXT
+sub_episode_id  TEXT      -- megaplay.buzz/stream/s-2/{id}/sub
+dub_episode_id  TEXT
+sub_url         TEXT      -- raw embed URL fallback
+dub_url         TEXT
+```
+
+### Virtual table: anime_fts (FTS5)
+Indexes title + slug. Kept in sync via INSERT/UPDATE/DELETE triggers.
+Query pattern: SELECT rowid FROM anime_fts WHERE anime_fts MATCH 'one piece*'
+
+---
+
+## Streaming architecture
+
+### How /api/stream works (server-side, no CORS issues)
+
+```
+Browser → GET /api/stream/173172/1/sub
+  → Worker fetches megaplay.buzz/stream/ani/173172/1/sub
+      with Referer: megaplay.buzz/api
+  → Worker extracts data-id from HTML
+  → Worker calls megaplay.buzz/stream/getSources?id={data-id}
+      with X-Requested-With: XMLHttpRequest (required, can't be set by browser)
+  → getSources returns { sources: { file: "https://cdn.mewstream.buzz/.../master.m3u8" }, tracks: [...] }
+  → Worker rewrites video URL → /api/cdn-hls?u={encoded}&r={encoded_referer}
+  → Worker returns complete hls.js player HTML with proxied URLs baked in
+
+Browser loads player HTML
+  → hls.js requests /api/cdn-hls?u=master.m3u8
+  → Worker fetches cdn.mewstream.buzz with Referer: megaplay.buzz/ → 200
+  → Worker rewrites all segment URLs in master.m3u8 to go through /api/cdn-hls
+  → hls.js requests /api/cdn-hls?u=seg-1-f1-v1-a1.jpg
+  → Worker fetches segment with correct headers → streams to browser
+```
+
+Why /api/cdn-hls is needed: CDN hosts (mewstream.buzz, flarestorm.buzz, etc.) use
+Cloudflare WAF to block requests with wrong Referer. Browser can't set Referer manually.
+Worker adds the correct Referer server-side.
+
+---
+
+## Environment variables / secrets
+
+| Name             | Type       | Purpose                                                      |
+|------------------|------------|--------------------------------------------------------------|
+| DB               | D1 binding | The Cloudflare D1 database (binding name must be "DB")       |
+| ANILIST_URL      | secret     | Cloudflared tunnel URL for AniList proxy                     |
+| ADMIN_TOKEN      | secret     | Bearer token for /admin/* routes                             |
+| DISCORD_WEBHOOK  | secret     | Discord webhook URL for missing stream alerts (optional)     |
+
+Set secrets: `wrangler secret put <NAME> --name otakubox`
+DB binding is in wrangler.toml, not a secret.
+
+---
+
+## Go scraper commands
+
+```bash
+# Full one-time scrape (~8800 shows, takes ~20min)
+go run ./cmd/scrape --db data/anime.db --no-eps
+
+# Incremental tracker — runs forever, pushes changes to D1 automatically
+go run ./cmd/track --db data/anime.db --interval 10
+
+# Manual push to D1 (if needed)
+go run ./cmd/push --db data/anime.db --d1 otakubox --auto --batch 50
+```
+
+The tracker auto-pushes only changed rows via wrangler d1 execute on each poll cycle.
+No manual intervention needed once running.
+
+---
+
+## AniList proxy setup
+
+AniList blocks Cloudflare datacenter IPs. Proxy routes requests through your home IP.
+
+```
+Windows machine:
+  node proxy/server.js          (listens on :4191)
+  cloudflared tunnel --url http://localhost:4191
+    → gives you a trycloudflare.com URL
+
+Worker:
+  wrangler secret put ANILIST_URL --name otakubox
+  → enter the trycloudflare.com URL
+```
+
+Tunnel URL changes on restart. For permanent URL: use cloudflared login + named tunnel + custom domain.
+Start script: `cd proxy && .\start.ps1`
+
+---
+
+## custom_id scheme
+
+- AniList shows: `ani_{anilist_id}` — e.g. `ani_21` (One Piece)
+- Custom shows: `custom_{anikoto_id}` — e.g. `custom_8719`
+
+All API routes accept both anilist_id (number) and custom_id (string) interchangeably.
+custom_id is the stable URL-safe identifier to use in frontend links.
+
+---
+
+## Known limitations / gotchas
+
+1. Megaplay returns HTTP 200 even for missing content — detect by checking for "Error - MegaPlay" in HTML
+2. getSources requires X-Requested-With: XMLHttpRequest — browsers strip this header cross-origin, must go through Worker
+3. CDN segment hosts use random subdomains (n3Hp.flarestorm.buzz) — allowlist matches root domain suffix
+4. AniList has ~20k anime; our DB has ~8821 — shows not in DB are excluded from all routes
+5. The cloudflared tunnel URL changes on restart unless using a named tunnel
+6. D1 free tier: 5M reads/day, 100k writes/day — normal usage well within limits
+7. CF Worker free tier: 100k requests/day — video proxying counts per segment (~200 segments/episode)
+8. Streaming an episode proxies ~200 HTTP requests through the Worker (each m3u8 segment = 1 request)
+9. anikotoapi.site has no real search — /search uses D1 FTS5 only (no live API search)
+
+---
+
+## Adding a new API route
+
+1. Add handler in appropriate routes/*.js file
+2. Add `["GET", "/your/path/:param", handler]` to ROUTES array in index.js
+3. D1 queries → add helper to lib/d1.js
+4. AniList queries → add query string to lib/anilist.js
+
+Pattern syntax: `:name` = one segment, `*` = rest of path (captured as params.path).

@@ -3,31 +3,22 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import {
-  Bookmark,
-  Calendar,
-  Clock,
-  ExternalLink,
-  Play,
-  Star,
-  Tv,
-} from "lucide-react";
-import AnimeTrailerBackdrop from "@/components/AnimeTrailerBackdrop";
+import { Bookmark, Play, Star, Tv } from "lucide-react";
 import GenreChips from "@/components/GenreChips";
 import EpisodeCountBadges from "@/components/EpisodeCountBadges";
 import SeasonRail, { type SeasonEntry } from "@/components/SeasonRail";
-import SimilarCarousel from "@/components/SimilarCarousel";
-import { api, type AnimeMedia, normalizeScore, mediaYear, mediaStudios } from "@/lib/api";
-import { isBlockedAnime, filterAnimeList } from "@/lib/anime-filters";
+import { type AnimeMedia, normalizeScore, mediaStudios } from "@/lib/api";
+import { isBlockedAnime } from "@/lib/anime-filters";
 import { formatLabel } from "@/lib/format-labels";
 import { animeTitle } from "@/lib/anime-title";
-import { formatAnimeDate, resolveTrailer } from "@/lib/anime-trailer";
 import { clientApi } from "@/lib/client-api";
 import { useAuth } from "@/components/AuthProvider";
-import { fetchEpisodeCounts, rememberEpisodeCounts } from "@/lib/episode-counts";
-import { buildSeasonList, enrichSeasonCounts } from "@/lib/seasons-from-relations";
-import { getAnikotoEpCounts, getCachedEpCounts, getCachedSlug, akFetchEpisodeList } from "@/lib/anikoto-cache";
-import { filterExternalLinks, isBlockedExternalLink } from "@/lib/external-links";
+import {
+  otakubox,
+  cardToMedia,
+  buildSeasonChain,
+  findNextInChain,
+} from "@/lib/otakubox";
 
 type EpCounts = { sub: number; dub: number };
 
@@ -40,7 +31,6 @@ export default function AnimeOverviewPage() {
   const [loading, setLoading] = useState(true);
   const [anime, setAnime] = useState<AnimeMedia | null>(null);
   const [epCounts, setEpCounts] = useState<EpCounts>({ sub: 0, dub: 0 });
-  const [recs, setRecs] = useState<AnimeMedia[]>([]);
   const [seasons, setSeasons] = useState<SeasonEntry[]>([]);
   const [bookmarked, setBookmarked] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -49,120 +39,46 @@ export default function AnimeOverviewPage() {
     setLoading(true);
     setLoadError("");
     setSeasons([]);
-    setRecs([]);
 
-    // Show cached Anikoto counts immediately
-    const preCached = getCachedEpCounts(id);
-    if (preCached && (preCached.sub > 0 || preCached.dub > 0)) {
-      setEpCounts(preCached);
-    }
-
-    // If Anikoto ID is cached, fetch ep list in parallel with main load
-    const cachedSlug = getCachedSlug(id);
-    const akParallelPromise = cachedSlug
-      ? akFetchEpisodeList(cachedSlug.anikotoId).catch(() => null)
-      : Promise.resolve(null);
-
-    const [detailRes, recRes, akParallelRes] = await Promise.allSettled([
-      api.getAnime(id),
-      api.getRecommendations(id, 1, 12),
-      akParallelPromise,
+    const [detailRes, relRes] = await Promise.allSettled([
+      otakubox.getShow(id),
+      otakubox.getAllRelations(id),
     ]);
 
     if (detailRes.status === "rejected") {
-      setLoadError(
-        detailRes.reason instanceof Error ? detailRes.reason.message : "Anime not found"
-      );
+      setLoadError("Anime not found");
       setAnime(null);
       setLoading(false);
       return;
     }
 
     try {
-      const info = detailRes.value.info;
-      if (isBlockedAnime(info)) {
+      const show = detailRes.value;
+      const media = cardToMedia(show);
+      if (isBlockedAnime(media)) {
         router.replace("/browse");
         return;
       }
-      setAnime(info);
+      setAnime(media);
+      setEpCounts({ sub: show.sub_count, dub: show.dub_count });
 
-      let subN = preCached?.sub ?? 0;
-      let dubN = preCached?.dub ?? 0;
-
-      // Apply parallel Anikoto result (available when anikotoId was cached)
-      if (akParallelRes.status === "fulfilled" && akParallelRes.value) {
-        const ak = akParallelRes.value;
-        subN = Math.max(subN, ak.subCount);
-        dubN = Math.max(dubN, ak.dubCount);
-      }
-
-      if (subN > 0 || dubN > 0) {
-        setEpCounts({ sub: subN, dub: dubN });
-        rememberEpisodeCounts({ [id]: { sub: subN, dub: dubN } });
-      }
-
-      // First visit (no cached slug): resolve in background
-      if (!cachedSlug) {
-        const titleStr = animeTitle(info);
-        getAnikotoEpCounts(id, titleStr).then((akCounts) => {
-          if (!akCounts) return;
-          setEpCounts((prev) => {
-            const s = Math.max(prev.sub, akCounts.sub);
-            const d = Math.max(prev.dub, akCounts.dub);
-            if (s === prev.sub && d === prev.dub) return prev;
-            rememberEpisodeCounts({ [id]: { sub: s, dub: d } });
-            return { sub: s, dub: d };
-          });
-        }).catch(() => {});
-      }
-
-      if (recRes.status === "fulfilled") {
-        const recommendations = (recRes.value.recommendations || [])
-          .map((r) => r.mediaRecommendation)
-          .filter(Boolean);
-        setRecs(filterAnimeList(recommendations));
-      }
-
-      // BFS traversal of SEQUEL/PREQUEL chain — up to 4 hops so the full
-      // franchise is visible regardless of which part you start on.
-      // (AniList only returns direct neighbours; Part 5 of 6 needs 4 hops back.)
-      const allEdges = [...(info.relations?.edges || [])];
-      const seen = new Set<number>([id]);
-      for (const e of allEdges) if (e.node?.id) seen.add(e.node.id);
-
-      let frontier = allEdges
-        .filter((e) => ["SEQUEL", "PREQUEL"].includes(e.relationType || "") && e.node?.id)
-        .map((e) => e.node!.id);
-
-      for (let hop = 0; hop < 4 && frontier.length > 0; hop++) {
-        const fetches = await Promise.allSettled(frontier.map((rid) => api.getRelations(rid)));
-        const nextFrontier: number[] = [];
-        for (const res of fetches) {
-          if (res.status !== "fulfilled") continue;
-          const edges = res.value.relations as NonNullable<typeof info.relations>["edges"];
-          if (!Array.isArray(edges)) continue;
-          for (const edge of edges) {
-            if (!edge?.node?.id || seen.has(edge.node.id)) continue;
-            seen.add(edge.node.id);
-            allEdges.push(edge);
-            if (["SEQUEL", "PREQUEL"].includes(edge.relationType || "")) {
-              nextFrontier.push(edge.node.id);
-            }
-          }
+      // Season chain from relation graph
+      if (relRes.status === "fulfilled") {
+        const { nodes, edges } = relRes.value;
+        const chainNodes = buildSeasonChain(id, nodes, edges);
+        if (chainNodes.length > 1) {
+          const nextId = findNextInChain(id, edges);
+          const entries: SeasonEntry[] = chainNodes.map((n) => ({
+            id: n.anilist_id,
+            label: n.title,
+            title: n.title,
+            image: n.cover,
+            format: n.type,
+            isCurrent: n.anilist_id === id,
+            isNext: n.anilist_id === nextId,
+          }));
+          setSeasons(entries);
         }
-        frontier = nextFrontier;
-      }
-
-      const relations = { edges: allEdges };
-      const fullSeasons = buildSeasonList(info, relations);
-      if (fullSeasons.length) {
-        const seasonCounts = await fetchEpisodeCounts(fullSeasons.map((s) => s.id));
-        setSeasons(
-          enrichSeasonCounts(fullSeasons, {
-            ...seasonCounts,
-            [id]: { sub: subN, dub: dubN },
-          })
-        );
       }
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Failed to load");
@@ -219,46 +135,35 @@ export default function AnimeOverviewPage() {
   }
 
   const title = animeTitle(anime);
-  const poster =
-    anime.bannerImage || anime.coverImage?.extraLarge || anime.coverImage?.large || "";
-  const { youtubeId } = resolveTrailer(anime);
+  const poster = anime.bannerImage || anime.coverImage?.extraLarge || anime.coverImage?.large || "";
   const plannedEps = anime.episodes ?? null;
   const score = normalizeScore(anime);
   const genres = anime.genres || [];
   const studios = mediaStudios(anime).join(", ") || null;
-  const start = formatAnimeDate(anime.startDate);
-  const end = formatAnimeDate(anime.endDate);
-  const dateLine =
-    start && end && start !== end ? `${start} – ${end}` : start || (mediaYear(anime) ? String(mediaYear(anime)) : null);
-
-  const external = filterExternalLinks([
-    ...(anime.siteUrl ? [{ url: anime.siteUrl, site: "AniList", type: "INFO" }] : []),
-    ...(anime.externalLinks || []).map((l) => ({
-      url: l.url,
-      site: l.site,
-      type: l.type,
-    })),
-  ]);
-  const streaming = (anime.streamingEpisodes || []).filter(
-    (ep) => ep.url && !isBlockedExternalLink({ url: ep.url, site: ep.site })
-  );
+  const year = anime.seasonYear ?? (anime as { year?: number }).year ?? null;
   const hasPlayable = epCounts.sub > 0 || epCounts.dub > 0;
   const watchHref = `/anime/${id}/watch`;
 
   return (
     <div className="pb-12">
       <section className="relative min-h-[min(68svh,620px)] w-full overflow-hidden sm:min-h-[min(72vh,640px)]">
-        <AnimeTrailerBackdrop youtubeId={youtubeId} poster={poster} title={title} />
+        {/* Banner backdrop */}
+        <div className="absolute inset-0 overflow-hidden">
+          {poster ? (
+            <img
+              src={poster}
+              alt=""
+              className="h-full w-full object-cover opacity-30 blur-sm scale-105"
+            />
+          ) : null}
+          <div className="absolute inset-0 bg-gradient-to-t from-[#0d0f14] via-[#0d0f14]/60 to-transparent" />
+        </div>
 
         <div className="relative z-10 mx-auto flex min-h-[min(68svh,620px)] max-w-6xl flex-col justify-end px-3 pb-8 pt-20 sm:min-h-[min(72vh,640px)] sm:px-4 sm:pb-10 sm:pt-24">
           <nav className="mb-3 font-mono text-[10px] uppercase tracking-widest text-white/50">
-            <Link href="/" className="hover:text-[var(--accent)]">
-              Home
-            </Link>
+            <Link href="/" className="hover:text-[var(--accent)]">Home</Link>
             <span className="mx-1.5">/</span>
-            <Link href="/browse" className="hover:text-[var(--accent)]">
-              Browse
-            </Link>
+            <Link href="/browse" className="hover:text-[var(--accent)]">Browse</Link>
             <span className="mx-1.5">/</span>
             <span className="text-white/80">{title}</span>
           </nav>
@@ -295,18 +200,8 @@ export default function AnimeOverviewPage() {
                 {anime.format ? (
                   <MetaPill icon={<Tv className="h-3 w-3" />} label={formatLabel(anime.format)} />
                 ) : null}
-                {anime.status ? (
-                  <MetaPill label={formatLabel(anime.status)} />
-                ) : null}
-                {dateLine ? (
-                  <MetaPill icon={<Calendar className="h-3 w-3" />} label={dateLine} />
-                ) : null}
-                {anime.duration ? (
-                  <MetaPill
-                    icon={<Clock className="h-3 w-3" />}
-                    label={`${anime.duration} min`}
-                  />
-                ) : null}
+                {anime.status ? <MetaPill label={formatLabel(anime.status)} /> : null}
+                {year ? <MetaPill label={String(year)} /> : null}
               </div>
 
               <GenreChips genres={genres} max={14} variant="hero" className="mt-4" />
@@ -357,101 +252,24 @@ export default function AnimeOverviewPage() {
             <InfoGrid
               items={[
                 studios ? { label: "Studio", value: studios } : null,
-                anime.source ? { label: "Source", value: formatLabel(anime.source) } : null,
-                anime.countryOfOrigin
-                  ? { label: "Country", value: anime.countryOfOrigin }
-                  : null,
-                anime.season && (anime.seasonYear ?? anime.year)
-                  ? {
-                      label: "Season",
-                      value: `${formatLabel(anime.season)} ${anime.seasonYear ?? anime.year}`,
-                    }
+                anime.season && year
+                  ? { label: "Season", value: `${formatLabel(anime.season)} ${year}` }
                   : null,
                 plannedEps ? { label: "Planned episodes", value: String(plannedEps) } : null,
-                anime.popularity
-                  ? { label: "Popularity", value: `#${anime.popularity.toLocaleString()}` }
-                  : null,
               ].filter(Boolean) as { label: string; value: string }[]}
             />
           </div>
 
-          <aside className="space-y-8">
-            {(external.length > 0 || streaming.length > 0) && (
-              <section className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-                <h2 className="mb-3 font-mono text-xs font-semibold uppercase tracking-widest text-[var(--muted)]">
-                  Links &amp; resources
-                </h2>
-                <ul className="space-y-2">
-                  {external.map((link) => (
-                    <li key={link.url}>
-                      <a
-                        href={link.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-2 text-sm text-[var(--foreground)] hover:text-[var(--accent)]"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                        <span className="truncate">{link.site}</span>
-                      </a>
-                    </li>
-                  ))}
-                  {streaming.map((ep, i) => (
-                    <li key={`${ep.url}-${i}`}>
-                      <a
-                        href={ep.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-2 text-sm text-[var(--foreground)] hover:text-[var(--accent)]"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                        <span className="truncate">
-                          {ep.site}
-                          {ep.title ? ` — ${ep.title}` : ""}
-                        </span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            {anime.tags && anime.tags.length > 0 ? (
-              <section className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-                <h2 className="mb-3 font-mono text-xs font-semibold uppercase tracking-widest text-[var(--muted)]">
-                  Tags
-                </h2>
-                <div className="flex flex-wrap gap-1.5">
-                  {anime.tags
-                    .filter((t) => !t.isMediaSpoiler)
-                    .slice(0, 12)
-                    .map((t) => (
-                      <span
-                        key={t.name}
-                        className="rounded-md border border-[var(--border)] bg-[#0a0b0f] px-2 py-0.5 font-mono text-[10px] text-[var(--muted)]"
-                      >
-                        {t.name}
-                      </span>
-                    ))}
-                </div>
-              </section>
-            ) : null}
-          </aside>
+          <aside className="space-y-8" />
         </div>
 
         <SeasonRail seasons={seasons} currentId={id} />
-        <SimilarCarousel items={recs} />
       </div>
     </div>
   );
 }
 
-function MetaPill({
-  label,
-  icon,
-}: {
-  label: string;
-  icon?: ReactNode;
-}) {
+function MetaPill({ label, icon }: { label: string; icon?: ReactNode }) {
   return (
     <span className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-black/35 px-2 py-0.5 font-mono text-xs text-white/85 backdrop-blur-sm">
       {icon}
@@ -470,9 +288,7 @@ function InfoGrid({ items }: { items: { label: string; value: string }[] }) {
       <dl className="grid gap-3 sm:grid-cols-2">
         {items.map((row) => (
           <div key={row.label}>
-            <dt className="font-mono text-[10px] uppercase tracking-widest text-[var(--muted)]">
-              {row.label}
-            </dt>
+            <dt className="font-mono text-[10px] uppercase tracking-widest text-[var(--muted)]">{row.label}</dt>
             <dd className="mt-0.5 text-sm text-[var(--foreground)]">{row.value}</dd>
           </div>
         ))}

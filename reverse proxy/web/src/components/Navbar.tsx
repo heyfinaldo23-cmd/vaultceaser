@@ -4,10 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Search, User } from "lucide-react";
-import { anilist } from "@/lib/anilist";
-import { akSearch } from "@/lib/anikoto-cache";
-import { filterAnimeList } from "@/lib/anime-filters";
-import { animeTitle } from "@/lib/anime-title";
+import { otakubox } from "@/lib/otakubox";
 import { useAuth } from "@/components/AuthProvider";
 
 type SuggestionItem = {
@@ -15,8 +12,6 @@ type SuggestionItem = {
   title: string;
   poster?: string;
 };
-
-const normalizeT = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 export default function Navbar() {
   const router = useRouter();
@@ -45,55 +40,18 @@ export default function Navbar() {
     }
     debounce.current = setTimeout(async () => {
       try {
-        // Run Anikoto and AniList in parallel
-        // Anikoto: best coverage (currently airing, DMC2, Bunny Girl, etc.)
-        // AniList: provides MAL IDs needed for routing
-        const [akRes, alRes] = await Promise.allSettled([
-          akSearch(val.trim()),
-          anilist.getSuggestions(val.trim()),
-        ]);
-
-        const akList = akRes.status === "fulfilled" ? akRes.value : [];
-        const alList = alRes.status === "fulfilled"
-          ? filterAnimeList(alRes.value.results || [])
-          : [];
-
-        // Build merged list
-        // AniList results have idMal → use as MAL ID (our routing)
-        // Anikoto-only results: match by title to AniList to get MAL ID
-        const seenIds = new Set<number>();
-        const list: SuggestionItem[] = [];
-
-        // AniList results first (reliable MAL IDs, good coverage)
-        for (const a of alList) {
-          if (list.length >= 6) break;
-          if (seenIds.has(a.id)) continue;
-          seenIds.add(a.id);
-          const raw = a as { coverImage?: { large?: string } };
-          list.push({ id: a.id, title: animeTitle(a), poster: raw.coverImage?.large || "" });
-        }
-
-        // Fill gaps from Anikoto results not yet in list
-        for (const ak of akList) {
-          if (list.length >= 8) break;
-          const normAk = normalizeT(ak.title);
-          // Check if already covered by AniList
-          const alMatch = alList.find((a) => normalizeT(animeTitle(a)) === normAk);
-          if (alMatch) {
-            // Replace AniList poster with Anikoto's if not already in list
-            const existing = list.find((s) => s.id === alMatch.id);
-            if (existing && ak.poster && !existing.poster) existing.poster = ak.poster;
-            continue;
-          }
-          // Not in AniList results — skip (no MAL ID to route to)
-        }
-
-        setSuggestions(list.slice(0, 6));
+        const hits = await otakubox.getSuggestions(val.trim());
+        const list: SuggestionItem[] = hits.slice(0, 6).map((h) => ({
+          id: h.anilist_id,
+          title: h.title,
+          poster: h.cover,
+        }));
+        setSuggestions(list);
         setOpen(list.length > 0);
       } catch {
         setSuggestions([]);
       }
-    }, 400);
+    }, 350);
   };
 
   const searchBox = (mobile = false) => (

@@ -6,57 +6,40 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import AnimeCard, { AnimeCardSkeleton } from "@/components/AnimeCard";
 import BrowseFilterBar from "@/components/BrowseFilterBar";
-import { type AnimeMedia, type GenreData, api } from "@/lib/api";
-import { filterAnimeList } from "@/lib/anime-filters";
-import { akFetchFilter } from "@/lib/anikoto-cache";
-import type { AkFilterItem } from "@/lib/anikoto";
+import { type GenreData } from "@/lib/api";
+import { otakubox, cardToMedia } from "@/lib/otakubox";
 
-type AkResult = AnimeMedia & { akSub: number; akDub: number };
-
-async function resolveAkItems(items: AkFilterItem[]): Promise<AkResult[]> {
-  if (!items.length) return [];
-
-  // Batch resolve titles → MAL IDs via server-side static catalog
-  const titles = items.flatMap((i) => [i.title, i.native].filter(Boolean));
-  const unique = [...new Set(titles)];
-  let titleMap: Record<string, number> = {};
-  try {
-    const qs = `titles=${encodeURIComponent(unique.join("|"))}`;
-    const res = await fetch(`/api/resolve-titles?${qs}`, { cache: "no-store" });
-    if (res.ok) titleMap = (await res.json()) as Record<string, number>;
-  } catch {
-    // silently continue — some items just won't have MAL IDs
-  }
-
-  const seen = new Set<number>();
-  const out: AkResult[] = [];
-
-  for (const item of items) {
-    const malId = titleMap[item.title] ?? titleMap[item.native] ?? 0;
-    if (!malId || seen.has(malId)) continue;
-    seen.add(malId);
-
-    out.push({
-      id: malId,
-      title: { romaji: item.title, english: item.title, native: item.native },
-      coverImage: { large: item.poster, extraLarge: item.poster },
-      format: item.type.toUpperCase() as AnimeMedia["format"],
-      genres: item.genres,
-      averageScore: item.score ? Math.round(item.score * 10) : undefined,
-      isAdult: false,
-      akSub: item.subCount,
-      akDub: item.dubCount,
-    });
-  }
-
-  return out;
-}
+// Map AniList-style filter values → Otakubox values
+const FORMAT_MAP: Record<string, string> = {
+  TV: "TV",
+  MOVIE: "Movie",
+  OVA: "OVA",
+  ONA: "ONA",
+  SPECIAL: "Special",
+  TV_SHORT: "",
+};
+const STATUS_MAP: Record<string, string> = {
+  RELEASING: "Currently Airing",
+  FINISHED: "Completed",
+  NOT_YET_RELEASED: "Not yet aired",
+  CANCELLED: "",
+  HIATUS: "",
+};
+const SORT_MAP: Record<string, string> = {
+  UPDATED_AT_DESC: "recent",
+  POPULARITY_DESC: "score",
+  TRENDING_DESC: "score",
+  START_DATE_DESC: "year",
+  SCORE_DESC: "score",
+};
 
 function BrowseContent() {
   const searchParams = useSearchParams();
 
   const [loading, setLoading] = useState(true);
-  const [results, setResults] = useState<AkResult[]>([]);
+  const [results, setResults] = useState<ReturnType<typeof cardToMedia>[]>([]);
+  const [subCounts, setSubCounts] = useState<number[]>([]);
+  const [dubCounts, setDubCounts] = useState<number[]>([]);
   const [genres, setGenres] = useState<GenreData | null>(null);
   const [openGenre, setOpenGenre] = useState(false);
 
@@ -64,9 +47,7 @@ function BrowseContent() {
   const [selectedGenre, setSelectedGenre] = useState(searchParams.get("genre") || "");
   const [selectedFormat, setSelectedFormat] = useState(searchParams.get("format") || "");
   const [selectedStatus, setSelectedStatus] = useState(searchParams.get("status") || "");
-  const selectedSeason = searchParams.get("season") || "";
-  const selectedYear = searchParams.get("year") || "";
-  const [sort, setSort] = useState(searchParams.get("sort") || "POPULARITY_DESC");
+  const [sort, setSort] = useState(searchParams.get("sort") || "SCORE_DESC");
   const [page, setPage] = useState(1);
   const [hasNextPage, setHasNextPage] = useState(false);
 
@@ -75,32 +56,34 @@ function BrowseContent() {
   const fetchResults = useCallback(async (p: number) => {
     setLoading(true);
     try {
-      const items = await akFetchFilter({
-        keyword: query.trim() || undefined,
+      const cards = await otakubox.search({
+        q: query.trim() || undefined,
         genre: selectedGenre || undefined,
-        format: selectedFormat || undefined,
-        status: selectedStatus || undefined,
-        season: selectedSeason || undefined,
-        year: selectedYear || undefined,
-        sort,
+        type: FORMAT_MAP[selectedFormat] || undefined,
+        status: STATUS_MAP[selectedStatus] || undefined,
+        sort: SORT_MAP[sort] || "score",
         page: p,
+        limit: perPage,
       });
 
-      const resolved = await resolveAkItems(items);
-      const filtered = filterAnimeList(resolved);
-      setResults(filtered);
-      // Anikoto returns ~28 per page; show next button when full page comes back
-      setHasNextPage(items.length >= 24);
+      setResults(cards.map(cardToMedia));
+      setSubCounts(cards.map((c) => c.sub_count));
+      setDubCounts(cards.map((c) => c.dub_count));
+      setHasNextPage(cards.length >= perPage);
     } catch (e) {
       console.error("Browse search failed:", e);
       setResults([]);
+      setSubCounts([]);
+      setDubCounts([]);
     } finally {
       setLoading(false);
     }
-  }, [query, selectedGenre, selectedFormat, selectedStatus, selectedSeason, selectedYear, sort]);
+  }, [query, selectedGenre, selectedFormat, selectedStatus, sort]);
 
   useEffect(() => {
-    api.getGenres().then(setGenres).catch(() => {});
+    otakubox.getGenres()
+      .then((list) => setGenres({ genres: list, formats: [], statuses: [], seasons: [] }))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -126,7 +109,7 @@ function BrowseContent() {
       <div className="mx-auto max-w-[1440px] px-3 py-5 sm:px-4 sm:py-6">
         <div className="mb-5 flex items-center justify-between gap-3">
           <h1 className="font-display text-xl font-bold uppercase tracking-wide text-white sm:text-2xl md:text-3xl">
-            Browser
+            Browse
           </h1>
           <span className="shrink-0 text-xs text-[#9ca3af] sm:text-sm">
             {results.length} anime
@@ -160,8 +143,8 @@ function BrowseContent() {
                 key={`${anime.id}-${i}`}
                 anime={anime}
                 size="medium"
-                subCount={anime.akSub}
-                dubCount={anime.akDub}
+                subCount={subCounts[i]}
+                dubCount={dubCounts[i]}
               />
             ) : (
               <AnimeCardSkeleton key={i} />
@@ -184,9 +167,7 @@ function BrowseContent() {
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <span className="px-3 font-mono text-sm text-[#9ca3af]">
-              {page}
-            </span>
+            <span className="px-3 font-mono text-sm text-[#9ca3af]">{page}</span>
             <Button
               variant="outline"
               size="sm"

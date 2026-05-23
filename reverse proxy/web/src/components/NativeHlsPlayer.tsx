@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
 import Hls from "hls.js";
 import {
   Captions,
@@ -74,6 +74,10 @@ type Props = {
   onProgress?: (progress: NativePlayerProgress) => void;
   onEnded?: () => void;
   onError?: (message: string) => void;
+};
+
+export type NativeHlsPlayerHandle = {
+  seekBy: (delta: number) => void;
 };
 
 const CAPTION_PREFS_KEY = "ov-caption-prefs";
@@ -180,7 +184,7 @@ function cueToText(cue: TextTrackCue): string {
     .trim();
 }
 
-export default function NativeHlsPlayer({
+const NativeHlsPlayer = forwardRef<NativeHlsPlayerHandle, Props>(function NativeHlsPlayer({
   sourceId,
   category,
   resumeAt,
@@ -190,7 +194,7 @@ export default function NativeHlsPlayer({
   onProgress,
   onEnded,
   onError,
-}: Props) {
+}, ref) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const autoSkipRef = useRef(autoSkip);
@@ -571,6 +575,14 @@ export default function NativeHlsPlayer({
     setCaptionPrefs((prev) => saveCaptionPrefs({ ...prev, ...patch }));
   };
 
+  useImperativeHandle(ref, () => ({
+    seekBy: (delta: number) => {
+      const video = videoRef.current;
+      if (!video) return;
+      video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + delta));
+    },
+  }));
+
   const progressPercent = durationSeconds ? Math.min(100, Math.max(0, (currentTime / durationSeconds) * 100)) : 0;
 
   const currentQualityLabel =
@@ -596,7 +608,6 @@ export default function NativeHlsPlayer({
         className="ov-native-video h-full w-full bg-black object-contain"
         playsInline
         crossOrigin="anonymous"
-        onClick={togglePlay}
       />
 
       {/* Loading overlay with nekos gif */}
@@ -838,4 +849,6 @@ export default function NativeHlsPlayer({
       </div>
     </div>
   );
-}
+});
+
+export default NativeHlsPlayer;
