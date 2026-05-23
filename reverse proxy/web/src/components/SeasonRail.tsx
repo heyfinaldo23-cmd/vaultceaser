@@ -14,6 +14,7 @@ export type SeasonEntry = {
   image?: string;
   relation?: string;
   format?: string;
+  year?: number;
   isCurrent?: boolean;
   isNext?: boolean;
 };
@@ -145,11 +146,11 @@ export default function SeasonRail({
                 <p className="line-clamp-2 font-mono text-[10px] font-bold leading-tight text-white">
                   {s.label || s.title}
                 </p>
-                {epCount != null && epCount > 0 && (
-                  <p className="mt-0.5 font-mono text-[9px] text-white/50">
-                    {epCount} ep{epCount !== 1 ? "s" : ""}
-                  </p>
-                )}
+                <p className="mt-0.5 font-mono text-[9px] text-white/45">
+                  {[s.year, epCount != null && epCount > 0 ? `${epCount} ep${epCount !== 1 ? "s" : ""}` : null]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
               </div>
             </Link>
           );

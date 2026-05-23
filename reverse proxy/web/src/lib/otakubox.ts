@@ -47,6 +47,7 @@ export interface OtakuRelationNode {
   title: string;
   cover?: string;
   type?: string;
+  year?: number;
   streamable: boolean;
 }
 
@@ -246,21 +247,21 @@ function parseRelations(raw: RawRelItem[]): { nodes: OtakuRelationNode[]; edges:
   const nodeMap = new Map<number, OtakuRelationNode>();
   const edges: OtakuRelationEdge[] = [];
 
-  const upsertNode = (id: number, title: string, cover?: string, type?: string, streamable = false) => {
+  const upsertNode = (id: number, title: string, cover?: string, type?: string, year?: number, streamable = false) => {
     const existing = nodeMap.get(id);
     if (!existing) {
-      nodeMap.set(id, { id, anilist_id: id, custom_id: String(id), title, cover, type, streamable });
+      nodeMap.set(id, { id, anilist_id: id, custom_id: String(id), title, cover, type, year, streamable });
     } else {
-      // Fill in data we didn't have when the node was first created from a top-level item
       if (cover && !existing.cover) existing.cover = cover;
       if (type && !existing.type) existing.type = type;
+      if (year && !existing.year) existing.year = year;
     }
   };
 
   for (const item of raw) {
-    upsertNode(item.id, item.title, item.cover, item.format, item.streamable);
+    upsertNode(item.id, item.title, item.cover, item.format, undefined, item.streamable);
     for (const rel of item.relations || []) {
-      upsertNode(rel.id, rel.title, rel.cover, rel.format, rel.streamable);
+      upsertNode(rel.id, rel.title, rel.cover, rel.format, rel.year, rel.streamable);
       edges.push({ from: item.id, to: rel.id, relationType: rel.relation });
     }
   }
@@ -300,10 +301,10 @@ export function buildSeasonChain(
       }
     }
   }
-  // Include node if connected AND not an explicitly non-season format
-  return nodes.filter(
-    (n) => connected.has(n.anilist_id) && !NON_SEASON_FORMATS.has(n.type ?? "")
-  );
+  // Include node if connected AND not an explicitly non-season format, then sort by air year
+  return nodes
+    .filter((n) => connected.has(n.anilist_id) && !NON_SEASON_FORMATS.has(n.type ?? ""))
+    .sort((a, b) => (a.year ?? 9999) - (b.year ?? 9999));
 }
 
 /** Returns the anilist_id of the next node after currentId via a SEQUEL edge. */

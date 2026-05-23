@@ -76,6 +76,7 @@ export default function AnimeOverviewPage() {
             title: n.title,
             image: n.cover,
             format: n.type,
+            year: n.year,
             isCurrent: n.anilist_id === id,
             isNext: n.anilist_id === nextId,
           }));
