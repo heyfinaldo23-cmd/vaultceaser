@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import AnimeCard, { AnimeCardSkeleton } from "@/components/AnimeCard";
 import BrowseFilterBar from "@/components/BrowseFilterBar";
 import { type GenreData } from "@/lib/api";
-import { otakubox, cardToMedia } from "@/lib/otakubox";
+import { otakubox, cardToMedia, resolveAnilistId } from "@/lib/otakubox";
 
 // Map AniList-style filter values → Otakubox values
 const FORMAT_MAP: Record<string, string> = {
@@ -66,7 +66,7 @@ function BrowseContent() {
         limit: perPage,
       });
 
-      const cards = rawCards.filter((c) => c.anilist_id);
+      const cards = rawCards.filter((c) => resolveAnilistId(c));
       setResults(cards.map(cardToMedia));
       setSubCounts(cards.map((c) => c.sub_count));
       setDubCounts(cards.map((c) => c.dub_count));

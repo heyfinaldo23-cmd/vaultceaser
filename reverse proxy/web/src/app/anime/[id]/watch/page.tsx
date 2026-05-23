@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, Suspense } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import NekosLoader from "@/components/NekosLoader";
 import { Bookmark } from "lucide-react";
 import GenreChips from "@/components/GenreChips";
 import EpisodeCountBadges from "@/components/EpisodeCountBadges";
@@ -435,7 +436,7 @@ function WatchPageInner() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [dimChrome, exitFocus]);
 
-  if (loading) return <p className="p-8 text-center font-mono text-sm text-[var(--muted)]">Loading…</p>;
+  if (loading) return <NekosLoader />;
   if (!anime) return <p className="p-8 text-center font-mono text-sm text-[var(--muted)]">{loadError || "Not found"}</p>;
 
   const title = animeTitle(anime);
@@ -527,7 +528,9 @@ function WatchPageInner() {
             )}>
               <div className="mb-2.5 flex flex-wrap items-center gap-2">
                 <span className="mr-1 font-mono text-[10px] font-semibold uppercase tracking-widest text-[var(--muted)]">Audio</span>
-                {(["sub", "dub"] as const).map((c) => (
+                {(["sub", "dub"] as const)
+                  .filter((c) => c === "sub" || epCounts.dub > 0)
+                  .map((c) => (
                   <button
                     key={c}
                     type="button"

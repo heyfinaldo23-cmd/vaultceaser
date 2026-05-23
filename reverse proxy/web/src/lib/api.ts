@@ -2,7 +2,7 @@
 // All data fetching is handled by src/lib/otakubox.ts.
 
 export interface AnimeMedia {
-  id: number;
+  id: number | undefined;
   type?: string;
   title: {
     romaji?: string;

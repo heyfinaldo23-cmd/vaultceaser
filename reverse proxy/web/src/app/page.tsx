@@ -8,7 +8,7 @@ import {
   listQualifiedLocalWatchProgress,
   type LocalWatchProgress,
 } from "@/lib/watch-progress";
-import { otakubox, cardToMedia, type OtakuCard } from "@/lib/otakubox";
+import { otakubox, cardToMedia, resolveAnilistId, type OtakuCard } from "@/lib/otakubox";
 import type { AnimeMedia } from "@/lib/api";
 
 // ─── cute grill widget ────────────────────────────────────────────────────────
@@ -180,10 +180,11 @@ function formatResumeTime(seconds?: number | null) {
 function OtakuRow({ cards }: { cards: OtakuCard[] }) {
   return (
     <HScroll>
-      {cards.filter((c) => c.anilist_id).map((card) => {
+      {cards.filter((c) => resolveAnilistId(c)).map((card) => {
         const media: AnimeMedia = cardToMedia(card);
+        const aid = resolveAnilistId(card)!;
         return (
-          <div key={card.anilist_id} className="w-[140px] shrink-0 sm:w-[160px]">
+          <div key={aid} className="w-[140px] shrink-0 sm:w-[160px]">
             <AnimeCard
               anime={media}
               size="compact"

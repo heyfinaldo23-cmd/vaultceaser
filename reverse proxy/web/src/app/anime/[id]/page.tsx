@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import NekosLoader from "@/components/NekosLoader";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Bookmark, Play, Star, Tv } from "lucide-react";
@@ -124,9 +125,7 @@ export default function AnimeOverviewPage() {
     }
   };
 
-  if (loading) {
-    return <p className="p-8 text-center font-mono text-sm text-[var(--muted)]">Loading…</p>;
-  }
+  if (loading) return <NekosLoader />;
   if (!anime) {
     return (
       <p className="p-8 text-center font-mono text-sm text-[var(--muted)]">

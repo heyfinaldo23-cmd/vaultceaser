@@ -31,6 +31,7 @@ export function filterAnimeList<T extends Pick<AnimeMedia, "id" | "isAdult" | "g
   const seen = new Set<number>();
   return list.filter((x) => {
     if (isBlockedAnime(x)) return false;
+    if (!x.id) return true; // no dedup key available
     if (seen.has(x.id)) return false;
     seen.add(x.id);
     return true;

@@ -42,13 +42,14 @@ export default function Navbar() {
       try {
         const hits = await otakubox.getSuggestions(val.trim());
         const list: SuggestionItem[] = hits
-          .filter((h) => h.anilist_id)
+          .filter((h) => h.anilist_id || h.custom_id?.startsWith("ani_"))
           .slice(0, 6)
           .map((h) => ({
-            id: h.anilist_id,
+            id: (h.anilist_id ?? Number(h.custom_id?.slice(4))) || 0,
             title: h.title,
             poster: h.cover,
-          }));
+          }))
+          .filter((h) => h.id);
         setSuggestions(list);
         setOpen(list.length > 0);
       } catch {

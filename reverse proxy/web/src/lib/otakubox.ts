@@ -1,13 +1,14 @@
 import type { AnimeMedia } from "@/lib/api";
 
 const BASE = "https://otakubox.otakuboxapi.workers.dev";
+const ANILIST_GQL = "https://graphql.anilist.co";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface OtakuCard {
   id: number;
   custom_id: string;
-  anilist_id: number;
+  anilist_id: number | null;
   title: string;
   cover: string;
   banner?: string;
@@ -55,6 +56,19 @@ export interface OtakuRelationEdge {
   relationType: string;
 }
 
+export interface OtakuSearchParams {
+  q?: string;
+  genre?: string;
+  year?: number | string;
+  season?: string;
+  type?: string;
+  status?: string;
+  lang?: string;
+  sort?: string;
+  page?: number;
+  limit?: number;
+}
+
 // Raw shape returned by /all-relations endpoint
 type RawRelEntry = {
   relation: string;
@@ -76,41 +90,18 @@ type RawRelItem = {
   relations: RawRelEntry[];
 };
 
-function parseRelations(raw: RawRelItem[]): { nodes: OtakuRelationNode[]; edges: OtakuRelationEdge[] } {
-  const nodeMap = new Map<number, OtakuRelationNode>();
-  const edges: OtakuRelationEdge[] = [];
+// ─── ID resolver: handles custom_id pattern "ani_{anilist_id}" ────────────────
 
-  const upsertNode = (id: number, title: string, cover?: string, type?: string, streamable = false) => {
-    if (!nodeMap.has(id)) {
-      nodeMap.set(id, { id, anilist_id: id, custom_id: String(id), title, cover, type, streamable });
-    }
-  };
-
-  for (const item of raw) {
-    upsertNode(item.id, item.title, item.cover, item.format, item.streamable);
-    for (const rel of item.relations || []) {
-      upsertNode(rel.id, rel.title, rel.cover, rel.format, rel.streamable);
-      edges.push({ from: item.id, to: rel.id, relationType: rel.relation });
-    }
+export function resolveAnilistId(card: Pick<OtakuCard, "anilist_id" | "custom_id">): number | null {
+  if (card.anilist_id) return card.anilist_id;
+  if (card.custom_id?.startsWith("ani_")) {
+    const n = Number(card.custom_id.slice(4));
+    return n || null;
   }
-
-  return { nodes: Array.from(nodeMap.values()), edges };
+  return null;
 }
 
-export interface OtakuSearchParams {
-  q?: string;
-  genre?: string;
-  year?: number | string;
-  season?: string;
-  type?: string;
-  status?: string;
-  lang?: string;
-  sort?: string;
-  page?: number;
-  limit?: number;
-}
-
-// ─── Core fetch ───────────────────────────────────────────────────────────────
+// ─── Core fetch with retry ────────────────────────────────────────────────────
 
 type ApiOk<T> = { ok: true; data: T };
 type ApiErr = { ok: false; error: string; status: number };
@@ -129,25 +120,93 @@ async function get<T>(
   }
   const res = await fetch(url.toString(), { cache: "no-store" });
 
-  // Retry on 429 with exponential backoff (max 3 attempts)
+  // Retry on HTTP 429
   if (res.status === 429 && attempt < 3) {
-    const delay = (attempt + 1) * 1000;
-    await new Promise((r) => setTimeout(r, delay));
+    await new Promise((r) => setTimeout(r, (attempt + 1) * 1000));
     return get<T>(path, params, attempt + 1);
   }
 
   if (!res.ok) throw new Error(`Otakubox ${res.status}: ${path}`);
   const json = (await res.json()) as ApiRes<T>;
-  if (!json.ok) throw new Error((json as ApiErr).error || "Otakubox error");
+
+  // Retry when Otakubox itself got rate-limited by AniList
+  if (!json.ok) {
+    const bodyStatus = (json as ApiErr).status;
+    if (bodyStatus === 429 && attempt < 3) {
+      await new Promise((r) => setTimeout(r, (attempt + 1) * 1500));
+      return get<T>(path, params, attempt + 1);
+    }
+    throw new Error((json as ApiErr).error || "Otakubox error");
+  }
+
   return json.data;
+}
+
+// ─── AniList direct fallback (used when Otakubox hits AniList rate limit) ─────
+
+const AL_SHOW_QUERY = `
+query ($id: Int) {
+  Media(id: $id, type: ANIME) {
+    id title { english romaji }
+    coverImage { large extraLarge }
+    bannerImage format status season seasonYear episodes
+    averageScore description genres
+    studios { nodes { id name isAnimationStudio } }
+    nextAiringEpisode { episode airingAt timeUntilAiring }
+    synonyms
+  }
+}`;
+
+async function anilistGetShow(id: number): Promise<OtakuShow> {
+  const res = await fetch(ANILIST_GQL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ query: AL_SHOW_QUERY, variables: { id } }),
+    cache: "no-store",
+  });
+  const json = await res.json() as { data?: { Media?: Record<string, unknown> } };
+  const m = json.data?.Media as {
+    id: number; title?: { english?: string; romaji?: string };
+    coverImage?: { large?: string; extraLarge?: string };
+    bannerImage?: string; format?: string; status?: string;
+    season?: string; seasonYear?: number; episodes?: number;
+    averageScore?: number; description?: string; genres?: string[];
+    studios?: { nodes?: Array<{ id: number; name: string; isAnimationStudio: boolean }> };
+    nextAiringEpisode?: { episode: number; airingAt: number; timeUntilAiring: number } | null;
+    synonyms?: string[];
+  } | undefined;
+  if (!m) throw new Error("Not found on AniList");
+  return {
+    id: 0,
+    custom_id: `ani_${id}`,
+    anilist_id: m.id,
+    title: m.title?.english || m.title?.romaji || "Unknown",
+    cover: m.coverImage?.large || m.coverImage?.extraLarge || "",
+    banner: m.bannerImage || undefined,
+    year: m.seasonYear,
+    season: m.season?.toLowerCase(),
+    type: m.format || "TV",
+    status: m.status || "UNKNOWN",
+    genres: m.genres || [],
+    score: m.averageScore ? m.averageScore / 10 : undefined,
+    sub_count: 0,
+    dub_count: 0,
+    episode_count: m.episodes || 0,
+    streamable: true,
+    description: m.description || undefined,
+    studios: m.studios?.nodes?.map((n) => n.name) || [],
+    next_airing: m.nextAiringEpisode || null,
+    synonyms: m.synonyms || [],
+  };
 }
 
 // ─── Adapter: OtakuCard/Show → AnimeMedia ─────────────────────────────────────
 
 export function cardToMedia(card: OtakuCard): AnimeMedia {
   const show = card as OtakuShow;
+  const resolvedId = resolveAnilistId(card) ?? undefined;
   return {
-    id: card.anilist_id,
+    id: resolvedId,
     title: { english: card.title, romaji: card.title },
     coverImage: { large: card.cover, extraLarge: card.cover },
     bannerImage: card.banner,
@@ -181,9 +240,39 @@ export function cardToMedia(card: OtakuCard): AnimeMedia {
   };
 }
 
+// ─── Relations parser ─────────────────────────────────────────────────────────
+
+function parseRelations(raw: RawRelItem[]): { nodes: OtakuRelationNode[]; edges: OtakuRelationEdge[] } {
+  const nodeMap = new Map<number, OtakuRelationNode>();
+  const edges: OtakuRelationEdge[] = [];
+
+  const upsertNode = (id: number, title: string, cover?: string, type?: string, streamable = false) => {
+    const existing = nodeMap.get(id);
+    if (!existing) {
+      nodeMap.set(id, { id, anilist_id: id, custom_id: String(id), title, cover, type, streamable });
+    } else {
+      // Fill in data we didn't have when the node was first created from a top-level item
+      if (cover && !existing.cover) existing.cover = cover;
+      if (type && !existing.type) existing.type = type;
+    }
+  };
+
+  for (const item of raw) {
+    upsertNode(item.id, item.title, item.cover, item.format, item.streamable);
+    for (const rel of item.relations || []) {
+      upsertNode(rel.id, rel.title, rel.cover, rel.format, rel.streamable);
+      edges.push({ from: item.id, to: rel.id, relationType: rel.relation });
+    }
+  }
+
+  return { nodes: Array.from(nodeMap.values()), edges };
+}
+
 // ─── Season chain builder ─────────────────────────────────────────────────────
 
 const SEASON_REL = new Set(["SEQUEL", "PREQUEL"]);
+// Exclude these from the season rail — they're not proper "seasons"
+const NON_SEASON_FORMATS = new Set(["MOVIE", "OVA", "SPECIAL", "MUSIC", "ONE_SHOT", "MANGA", "NOVEL"]);
 
 export function buildSeasonChain(
   currentId: number,
@@ -211,7 +300,10 @@ export function buildSeasonChain(
       }
     }
   }
-  return nodes.filter((n) => connected.has(n.anilist_id));
+  // Include node if connected AND not an explicitly non-season format
+  return nodes.filter(
+    (n) => connected.has(n.anilist_id) && !NON_SEASON_FORMATS.has(n.type ?? "")
+  );
 }
 
 /** Returns the anilist_id of the next node after currentId via a SEQUEL edge. */
@@ -243,12 +335,22 @@ export const otakubox = {
   getGenres: () => get<string[]>("/genres"),
 
   getSuggestions: (q: string) =>
-    get<Array<{ custom_id: string; anilist_id: number; title: string; cover: string }>>(
+    get<Array<{ custom_id: string; anilist_id: number | null; title: string; cover: string }>>(
       "/suggestions",
       { q }
     ),
 
-  getShow: (id: number | string) => get<OtakuShow>(`/show/${id}`),
+  getShow: async (id: number | string): Promise<OtakuShow> => {
+    try {
+      return await get<OtakuShow>(`/show/${id}`);
+    } catch (e) {
+      // Fall back to AniList directly when Otakubox hits a rate limit
+      if (e instanceof Error && e.message.toLowerCase().includes("rate limit")) {
+        return anilistGetShow(Number(id));
+      }
+      throw e;
+    }
+  },
 
   getEpisodes: (id: number | string) => get<OtakuEpisode[]>(`/episodes/${id}`),
 
