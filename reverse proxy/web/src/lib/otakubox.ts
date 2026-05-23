@@ -360,3 +360,4 @@ export const otakubox = {
     return parseRelations(raw);
   },
 };
+
